@@ -1,0 +1,368 @@
+"""Главный объект MiniDock: связывает док, верхнюю панель, анимации, Launchpad и переключатель."""
+import atexit
+import sys
+import threading
+import time
+
+import win32api
+import win32event
+import win32gui
+import winerror
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtWidgets import QApplication
+
+from .animations import WindowAnimator
+from .config import load_cfg, save_cfg
+from .dock import Dock
+from .launchpad import Launchpad
+from .menubar import MenuBar
+from .previews import WindowPreview
+from .spotlight import Spotlight
+from .switcher import KeyHook, Switcher
+from .updater import Updater
+from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+                     EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
+                     force_foreground, foreground_is_fullscreen, get_work_area, primary_monitor_rect, set_window_shadows,
+                     set_work_area, taskbar_windows, user32, window_shadows)
+
+QUIT_EVENT = "MiniDock_Quit"
+# команды уже запущенному доку: MiniDock.pyw --launchpad / --settings (удобно повесить на ярлык)
+COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Settings",
+            "--spotlight": "MiniDock_Spotlight", "--test-switcher": "MiniDock_TestSwitcher",
+            "--test-spotlight": "MiniDock_TestSpotlight", "--test-lp-start": "MiniDock_TestLpStart",
+            "--reveal": "MiniDock_Reveal", "--test-preview": "MiniDock_TestPreview",
+            "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
+            "--test-lp-folder": "MiniDock_TestLpFolder"}
+LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
+
+
+class App:
+    def __init__(self, quit_event, script):
+        self.script = script
+        self.cfg = load_cfg(default_pinned)
+        save_cfg(self.cfg)
+        self.taskbar = Taskbar(self.cfg)
+        self.peek_until = 0.0
+        self.fullscreen = False
+        self.want_area = None
+        self.settings = None
+        self.mru = []  # окна в порядке последней активации (свежие в начале) — для Alt+Tab
+
+        self.save_timer = QTimer(singleShot=True, interval=400, timeout=lambda: save_cfg(self.cfg))
+        self.animator = WindowAnimator(self)
+        self.preview = WindowPreview(self)
+        self.dock = Dock(self)
+        self.bar = MenuBar(self)
+        self.launchpad = Launchpad(self)
+        self.spotlight = Spotlight(self)
+        self.switcher = Switcher(self)
+        self.keys = KeyHook(self)
+        self.updater = Updater(self)
+
+        self.apply_layout()
+        QApplication.primaryScreen().geometryChanged.connect(self.apply_layout)
+
+        self._hook_proc = WINEVENTPROC(self.on_winevent)
+        self._hooks = [user32.SetWinEventHook(lo, hi, None, self._hook_proc, 0, 0, 0x0002)  # SKIPOWNPROCESS
+                       for lo, hi in ((EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
+                                      (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
+                                      (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
+                                      (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
+
+        self.poll_timer = QTimer(interval=1000, timeout=self.poll)
+        self.poll_timer.start()
+        # команды (--quit, --launchpad, …) ждёт отдельный поток — в простое он спит и не тратит ничего
+        events = {QUIT_EVENT: quit_event}
+        events.update({flag: win32event.CreateEvent(None, False, False, name) for flag, name in COMMANDS.items()})
+        self.waiter = EventWaiter(events)
+        self.waiter.fired.connect(self.on_command)
+        self.poll()
+        self.bar.on_foreground(win32gui.GetForegroundWindow())
+
+    # -- settings
+    def bar_height(self):
+        return int(self.cfg["bar_height"])
+
+    def save_soon(self):
+        self.save_timer.start()
+
+    def set_cfg(self, key, value):
+        self.cfg[key] = value
+        self.save_soon()
+        self.apply_layout()
+
+    def open_settings(self):
+        from .settings import SettingsWindow
+        if self.settings is None:
+            self.settings = SettingsWindow(self)
+        g = QApplication.primaryScreen().geometry()
+        self.settings.move(g.center().x() - self.settings.width() // 2, g.center().y() - self.settings.height() // 2)
+        self.settings.showNormal()
+        self.settings.raise_()
+        self.settings.activateWindow()
+        # Windows не даёт фоновому процессу выводить окна вперёд — без этого окно открывалось позади программ
+        QTimer.singleShot(60, lambda: force_foreground(int(self.settings.winId())) if self.settings else None)
+
+    # -- layout of dock / bar / taskbar / work area
+    def apply_layout(self):
+        cfg = self.cfg
+        if cfg["replace_taskbar"]:
+            self.taskbar.hide()
+        elif self.taskbar.hidden or cfg.get("taskbar_orig_state") is not None:
+            self.taskbar.restore()
+        if cfg["menubar"] and not self.fullscreen:
+            self.bar.place()
+            self.bar.show()
+        else:
+            self.bar.hide()
+        self.dock.place()
+        if not self.fullscreen:
+            self.dock.show()
+        self.dock.apply_glass()
+        self.apply_shadows()
+        self.update_work_area()
+        self.launchpad.update()
+
+    def apply_shadows(self):
+        cfg = self.cfg
+        if cfg["shadows_orig"] is None:
+            cfg["shadows_orig"] = window_shadows()
+            self.save_soon()
+        want = bool(cfg["window_shadows"]) and cfg["shadows_orig"]
+        if window_shadows() != want:
+            set_window_shadows(want)
+
+    def update_work_area(self):
+        """Рабочая область: окна разворачиваются ровно под верхнюю панель и до края дока/экрана."""
+        cfg = self.cfg
+        if not cfg["replace_taskbar"] and not cfg["menubar"]:
+            if self.want_area is not None:
+                set_work_area(Taskbar.default_work_area())
+            self.want_area = None
+            return
+        dpr = QApplication.primaryScreen().devicePixelRatio()
+        mon = primary_monitor_rect()
+        l, t, r, b = mon if cfg["replace_taskbar"] else Taskbar.default_work_area()
+        if cfg["menubar"]:
+            t = mon[1] + round(self.bar_height() * dpr)
+        if cfg["replace_taskbar"] and not cfg["autohide"]:
+            thick = round(self.dock.reserve_thickness() * dpr)
+            if cfg["position"] == "bottom":
+                b -= thick
+            elif cfg["position"] == "left":
+                l += thick
+            else:
+                r -= thick
+        self.want_area = (l, t, r, b)
+        if get_work_area() != self.want_area:
+            set_work_area(self.want_area)
+
+    def cleanup(self):
+        self.animator.cleanup()
+        self.keys.unhook()
+        if self.taskbar.hidden or self.cfg.get("taskbar_orig_state") is not None:
+            self.taskbar.restore()
+        if self.want_area is not None:
+            set_work_area(Taskbar.default_work_area())
+            self.want_area = None
+        if self.cfg["shadows_orig"] is not None:
+            if window_shadows() != self.cfg["shadows_orig"]:
+                set_window_shadows(self.cfg["shadows_orig"])
+            self.cfg["shadows_orig"] = None
+        save_cfg(self.cfg)
+
+    def peek_taskbar(self):
+        """Временно показывает панель задач Windows, повторный вызов — прячет."""
+        if not self.cfg["replace_taskbar"]:
+            return
+        if self.peek_until:
+            self.peek_until = 0.0
+            self.taskbar.hide()
+        else:
+            self.peek_until = time.monotonic() + 15
+            self.taskbar.restore()
+
+    # -- commands and periodic checks
+    def on_command(self, flag):
+        if flag == QUIT_EVENT:
+            QApplication.quit()
+        elif flag == "--launchpad":
+            self.launchpad.toggle()
+        elif flag == "--settings":
+            self.open_settings()
+        elif flag == "--spotlight":
+            self.spotlight.toggle()
+        elif flag == "--reveal":
+            self.dock.reveal(4.0)
+        elif flag == "--test-lp-start":
+            prev = self.cfg["lp_mode"]
+            self.launchpad.open()
+            self.launchpad.set_mode("start")
+            QTimer.singleShot(3000, lambda: (self.launchpad.set_mode(prev), self.launchpad.close_animated()))
+        elif flag == "--test-spotlight":
+            self.spotlight.open()
+            self.spotlight.edit.setText("tele")
+            QTimer.singleShot(4000, self.spotlight.close_animated)
+        elif flag == "--test-switcher":
+            # открыть переключатель на самом свежем приложении и перейти к выбору его окон (как ↓, затем →)
+            self.switcher.begin(1)
+            QTimer.singleShot(150, lambda: self.switcher.step(-1))
+            QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
+            QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
+            QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-restore":
+            # развернуть последнее свёрнутое окно так же, как по клику на иконку в доке
+            for hwnd in reversed(list(self.animator.min_imgs)):
+                if win32gui.IsIconic(hwnd):
+                    self.dock.reveal(2)
+                    self.animator.restore(hwnd, self.animator.icon_for(hwnd))
+                    break
+        elif flag == "--test-folder":
+            # открыть первую папку дока
+            folders = self.dock.folders()
+            if folders:
+                self.dock.reveal(5)
+                QTimer.singleShot(300, lambda: self.dock.folder_popup.open(folders[0]))
+                QTimer.singleShot(4000, self.dock.folder_popup.close)
+        elif flag == "--test-lp-folder":
+            # Launchpad «Все»: сложить два первых приложения в папку и открыть её
+            lp = self.launchpad
+            lp.open()
+            lp.set_mode("all")
+            apps = [e for e in lp.top if e.get("kind") != "folder"]
+            if len(apps) >= 3 and not any(e.get("kind") == "folder" for e in lp.top):
+                lp.put_in_folder(apps[1], apps[0])
+                lp.put_in_folder(apps[2], next(e for e in lp.top if e.get("kind") == "folder"))
+            QTimer.singleShot(2500, lambda: lp.open_folder(next(e for e in lp.top if e.get("kind") == "folder")))
+            QTimer.singleShot(5000, lp.close_animated)
+        elif flag == "--test-preview":
+            # предпросмотр для первого запущенного приложения в доке, у которого есть окна
+            for it in self.dock.items():
+                if it.hwnds and it.cur is not None:
+                    self.dock.reveal(5)
+                    w = self.dock.to_win_rect(it.cur.translated(0, self.dock.hide_k * self.dock.hide_distance()))
+                    tl = self.dock.mapToGlobal(w.topLeft().toPoint())
+                    from PySide6.QtCore import QRectF
+                    self.preview.hold_until = time.monotonic() + 4
+                    self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
+                    QTimer.singleShot(4000, self.preview.close_preview)
+                    break
+
+    def poll(self):
+        """Раз в секунду: панель задач, рабочая область, полноэкранные игры, список окон для дока."""
+        if self.cfg["replace_taskbar"]:
+            if self.peek_until and time.monotonic() > self.peek_until:
+                self.peek_until = 0.0
+            if not self.peek_until and any(win32gui.IsWindowVisible(h) for h in taskbar_windows()):
+                self.taskbar.hide()
+        if self.want_area is not None and get_work_area() != self.want_area:
+            set_work_area(self.want_area)
+        full = foreground_is_fullscreen() and not self.launchpad.isVisible()
+        if full != self.fullscreen:
+            self.fullscreen = full
+            self.animator.gpu.set_enabled(not full)
+            for w in (self.dock, self.bar):
+                if full:
+                    w.hide()
+                elif w is self.dock or self.cfg["menubar"]:
+                    w.show()
+        wins = app_windows()
+        self.dock.poll_windows(wins)
+        self.animator.remember(wins)
+
+    # -- window events
+    def on_winevent(self, hook, event, hwnd, id_object, id_child, thread, ms):
+        if id_object != 0 or id_child != 0 or not hwnd:
+            return
+        try:
+            if event == EVENT_SYSTEM_FOREGROUND:
+                self.touch_mru(hwnd)
+                self.bar.on_foreground(hwnd)
+                QTimer.singleShot(400, lambda: self.animator.take_snapshot(hwnd))
+            elif event == EVENT_SYSTEM_CAPTURESTART:
+                self.animator.on_press(hwnd)
+            elif event == EVENT_SYSTEM_MINIMIZESTART:
+                self.animator.on_minimize_start(hwnd)
+            elif event == EVENT_SYSTEM_MINIMIZEEND:
+                self.animator.on_minimize_end(hwnd)
+            elif event == EVENT_OBJECT_SHOW:
+                self.animator.on_show(hwnd)
+            elif event == EVENT_OBJECT_HIDE:
+                self.animator.on_hide(hwnd)
+        except Exception:
+            pass
+
+    def touch_mru(self, hwnd):
+        if user32.GetAncestor(hwnd, 2) != hwnd:  # GA_ROOT: только окна верхнего уровня
+            return
+        if hwnd in self.mru:
+            self.mru.remove(hwnd)
+        self.mru.insert(0, hwnd)
+        if len(self.mru) > 200:
+            self.mru = [h for h in self.mru if win32gui.IsWindow(h)][:150]
+
+    def focus_windows(self, item, hwnds):
+        """Клик по иконке запущенной программы: развернуть / переключить окно / свернуть."""
+        fg = win32gui.GetForegroundWindow()
+        if fg in hwnds:
+            if len(hwnds) == 1:
+                win32gui.PostMessage(fg, 0x0112, 0xF020, 0)  # WM_SYSCOMMAND, SC_MINIMIZE
+                return
+            nxt = hwnds[(hwnds.index(fg) + 1) % len(hwnds)]
+        else:
+            nxt = hwnds[0]
+        if win32gui.IsIconic(nxt):
+            self.animator.restore(nxt, self.dock.icon_screen_rect(item))
+        else:
+            force_foreground(nxt)
+
+
+class EventWaiter(QObject):
+    """Поток, который спит до сигнала от другого процесса (MiniDock.pyw --quit / --launchpad / …)."""
+    fired = Signal(str)
+
+    def __init__(self, events):
+        super().__init__()
+        self.names = list(events)
+        self.handles = [events[n] for n in self.names]
+        threading.Thread(target=self.run, daemon=True, name="MiniDockCommands").start()
+
+    def run(self):
+        while True:
+            idx = win32event.WaitForMultipleObjects(self.handles, False, win32event.INFINITE)
+            i = idx - win32event.WAIT_OBJECT_0
+            if 0 <= i < len(self.names):
+                self.fired.emit(self.names[i])
+                if self.names[i] == QUIT_EVENT:
+                    return  # событие выхода не сбрасывается само — дальше ждать нечего
+
+
+def signal_running(name):
+    try:
+        win32event.SetEvent(win32event.OpenEvent(win32event.EVENT_MODIFY_STATE, False, name))
+    except Exception:
+        pass
+
+
+def main(script):
+    if "--quit" in sys.argv:
+        signal_running(QUIT_EVENT)
+        return
+    for flag, name in COMMANDS.items():
+        if flag in sys.argv:
+            signal_running(name)
+            return
+    mutex = win32event.CreateMutex(None, False, "MiniDock_SingleInstance")
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        return
+    quit_event = win32event.CreateEvent(None, True, False, QUIT_EVENT)
+    win32event.ResetEvent(quit_event)
+    qapp = QApplication(sys.argv)
+    qapp.setQuitOnLastWindowClosed(False)
+    app = App(quit_event, script)
+    # Панель задач, рабочая область и прозрачность чужих окон всегда возвращаются при выходе
+    atexit.register(app.cleanup)
+    qapp.aboutToQuit.connect(app.cleanup)
+    code = qapp.exec()
+    del mutex
+    sys.exit(code)

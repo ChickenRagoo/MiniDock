@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+release/
+build/version_info.txt
+build/MiniDock.png
+*.part
