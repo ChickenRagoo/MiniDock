@@ -39,8 +39,12 @@ pythonw MiniDock.pyw
 powershell -ExecutionPolicy Bypass -File build\build.ps1
 ```
 
-Готовый установщик появится в `release\`. Для автообновления выложите его в новый релиз GitHub
-с тегом `vX.Y.Z` (версия задаётся в `minidock/version.py`).
+Готовый установщик появится в `release\`. Новая версия: поднимите `__version__` в `minidock/version.py`,
+соберите установщик и опубликуйте релиз — у всех, у кого стоит MiniDock, он обновится сам:
+
+```bat
+python build\publish_release.py ChickenRagoo/MiniDock v1.3.1 release\MiniDock-Setup-1.3.1.exe "Что нового"
+```
 
 ## Структура
 
