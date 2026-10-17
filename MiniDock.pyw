@@ -26,7 +26,17 @@ if (getattr(sys, "frozen", False) or sys.stderr is None) and "--" not in " ".joi
     # без консоли (MiniDock.exe, pythonw) — ошибки пишем в файл, чтобы их можно было прислать
     _log_dir = os.path.join(os.environ.get("APPDATA", "."), "MiniDock")
     os.makedirs(_log_dir, exist_ok=True)
-    sys.stderr = sys.stdout = open(os.path.join(_log_dir, "error.log"), "a", encoding="utf-8", buffering=1)
+    _log = os.path.join(_log_dir, "error.log")
+    try:  # журнал не растёт бесконечно: больше 2 МБ — оставляем последние полмегабайта
+        if os.path.getsize(_log) > 2 * 1024 * 1024:
+            with open(_log, "rb") as f:
+                f.seek(-512 * 1024, 2)
+                tail = f.read()
+            with open(_log, "wb") as f:
+                f.write(tail[tail.find(b"\n") + 1:])
+    except OSError:
+        pass
+    sys.stderr = sys.stdout = open(_log, "a", encoding="utf-8", buffering=1)
     import faulthandler
     faulthandler.enable(file=sys.stderr, all_threads=True)  # падение внутри Windows/Qt тоже попадёт в журнал
 

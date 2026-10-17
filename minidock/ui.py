@@ -144,7 +144,12 @@ class VSyncClock(QObject):
         self.last_tick = now
         for t in list(self.timers):
             if t in self.timers:
-                t._fire(now)
+                try:
+                    t._fire(now)
+                except RuntimeError:
+                    # объект Qt таймера уже удалён (окно с анимацией закрыли посреди неё): убираем его. Раньше
+                    # ошибка обрывала весь кадр — остальные анимации, в том числе «джинн», замирали на полпути
+                    self.remove(t)
 
     def add(self, t):
         self.timers.add(t)
@@ -182,6 +187,8 @@ class FrameTimer(QObject):
         self.active = False
         self.last = 0.0
         self.dt = FRAME_REF
+        # удалили вместе с окном, не остановив, — сами выходим из часов кадров
+        self.destroyed.connect(lambda *_, clock=vsync_clock(), me=self: clock.remove(me))
 
     def start(self, *_):
         if not self.active:
