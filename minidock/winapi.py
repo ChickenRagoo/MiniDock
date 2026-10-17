@@ -414,6 +414,55 @@ def point_monitor(x, y):
     return int(win32api.MonitorFromPoint((int(x), int(y)), 2))
 
 
+_peek_fn = None
+
+
+def _peek_api():
+    """DwmpActivateLivePreview (dwmapi, порядковый номер 113) — то, чем панель задач Windows показывает окно
+    целиком при наведении на миниатюру. Не документирована, но ей пользуются и сторонние панели задач."""
+    global _peek_fn
+    if _peek_fn is None:
+        try:
+            fn = ctypes.WinDLL("dwmapi")[113]
+            fn.restype = ctypes.c_long
+            fn.argtypes = [wintypes.BOOL, wintypes.HWND, wintypes.HWND, wintypes.UINT, ctypes.c_void_p]
+            _peek_fn = fn
+        except (OSError, AttributeError):
+            _peek_fn = False
+    return _peek_fn or None
+
+
+def _exclude_own_from_peek():
+    """Окна MiniDock (док, панель, миниатюры) при подглядывании остаются видимыми:
+    DWMWA_EXCLUDED_FROM_PEEK (12) — окно не превращается в прозрачный контур."""
+    me = os.getpid()
+    on = ctypes.c_int(1)
+
+    def cb(h, _):
+        try:
+            if win32gui.IsWindowVisible(h) and win32process.GetWindowThreadProcessId(h)[1] == me:
+                dwmapi.DwmSetWindowAttribute(h, 12, ctypes.byref(on), ctypes.sizeof(on))
+        except Exception:
+            pass
+        return True
+    win32gui.EnumWindows(cb, None)
+
+
+def live_peek(hwnd, keep_on_top=None):
+    """Показать окно hwnd на его месте, остальные окна — прозрачными контурами. keep_on_top остаётся видимым.
+    hwnd=None — выйти из этого режима. True — получилось."""
+    fn = _peek_api()
+    if fn is None:
+        return False
+    try:
+        if hwnd:
+            _exclude_own_from_peek()
+            return fn(True, hwnd, keep_on_top, 1, None) == 0
+        return fn(False, None, None, 1, None) == 0
+    except OSError:
+        return False
+
+
 def fullscreen_monitor():
     """Монитор, на котором сейчас полноэкранная игра/видео (окно без заголовка на весь экран), или None."""
     fg = win32gui.GetForegroundWindow()

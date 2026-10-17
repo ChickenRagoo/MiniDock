@@ -38,7 +38,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--reveal": "MiniDock_Reveal", "--test-preview": "MiniDock_TestPreview",
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
-            "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose"}
+            "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
+            "--test-peek": "MiniDock_TestPeek"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -342,6 +343,19 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-peek":
+            # миниатюры первого запущенного приложения, через секунду — его первое окно целиком, ещё через 2 с — выход
+            self.on_command("--test-preview")
+
+            def peek():
+                pv = self.preview
+                if pv.isVisible() and pv.hwnds:
+                    pv.hover = (0, "thumb")
+                    pv.update_peek()
+                    pv.peek_timer.stop()
+                    pv.start_peek(pv.hwnds[0])
+            QTimer.singleShot(1000, peek)
+            QTimer.singleShot(3000, self.preview.stop_peek)
         elif flag == "--test-close":
             # Alt+Tab: навести крестик на окно Блокнота и закрыть его, как кликом (другие окна не трогаем)
             sw = self.switcher
@@ -403,16 +417,18 @@ class App:
             QTimer.singleShot(5000, lp.close_animated)
         elif flag == "--test-preview":
             # предпросмотр для первого запущенного приложения в доке, у которого есть окна
-            for it in self.dock.items():
-                if it.hwnds and it.cur is not None:
-                    self.dock.reveal(5)
-                    w = self.dock.to_win_rect(it.cur.translated(0, self.dock.hide_k * self.dock.hide_distance()))
-                    tl = self.dock.mapToGlobal(w.topLeft().toPoint())
-                    from PySide6.QtCore import QRectF
-                    self.preview.hold_until = time.monotonic() + 4
-                    self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
-                    QTimer.singleShot(4000, self.preview.close_preview)
-                    break
+            items = [it for it in self.dock.items() if it.hwnds and it.cur is not None]
+            # если запущен Блокнот — берём его (проверки «подглядывания» на небольшом окне)
+            items.sort(key=lambda it: not any(win32gui.GetClassName(h) == "Notepad" for h in it.hwnds))
+            if items:
+                it = items[0]
+                self.dock.reveal(5)
+                w = self.dock.to_win_rect(it.cur.translated(0, self.dock.hide_k * self.dock.hide_distance()))
+                tl = self.dock.mapToGlobal(w.topLeft().toPoint())
+                from PySide6.QtCore import QRectF
+                self.preview.hold_until = time.monotonic() + 4
+                self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
+                QTimer.singleShot(4000, self.preview.close_preview)
 
     def poll(self):
         """Раз в секунду: панель задач, рабочая область, полноэкранные игры, список окон для дока."""

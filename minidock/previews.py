@@ -20,7 +20,8 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from .animations import THUMB_PROPS
 from .ui import TOP_FLAGS, animate, fade_in, make_glass, prepare_glass, rounded_path
-from .winapi import dwmapi, force_foreground, native_overlay_window, syscommand, window_aspect, window_geometry
+from .winapi import (dwmapi, force_foreground, live_peek, native_overlay_window, syscommand, window_aspect,
+                     window_geometry)
 
 THUMB_RADIUS = 8.0
 
@@ -245,6 +246,10 @@ class WindowPreview(QWidget):
         self.font_x = QFont("Segoe MDL2 Assets", 7)
         self.show_timer = QTimer(self, singleShot=True, timeout=self._show_pending)
         self.hide_timer = QTimer(self, singleShot=True, interval=280, timeout=self._hide_if_away)
+        # наведение на миниатюру ненадолго — окно показывается целиком на своём месте (как в Windows)
+        self.peek_timer = QTimer(self, singleShot=True, interval=450, timeout=self._start_peek)
+        self.peeking = None      # окно, которое сейчас показано целиком
+        self.peek_target = None  # окно под мышью, ждёт задержку
         self.pending = None
         self.hold_until = 0.0  # для команды --test-preview: не прятать, пока не истечёт
 
@@ -331,6 +336,7 @@ class WindowPreview(QWidget):
     def close_preview(self):
         self.show_timer.stop()
         self.hide_timer.stop()
+        self.stop_peek()
         self.thumbs.hide()
         self.hide()
         self.item = None
@@ -370,6 +376,36 @@ class WindowPreview(QWidget):
             self.hover = hover
             self.update()
             self.thumbs.refresh_mask(self, self.tiles, self.paint_overlay, self.thumb_radius)
+            self.update_peek()
+
+    # -- окно целиком при наведении на миниатюру (Aero Peek)
+    def update_peek(self):
+        hover = self.hover
+        target = self.hwnds[hover[0]] if hover is not None and hover[0] < len(self.hwnds) else None
+        if target is None or not self.cfg["dock_peek"]:
+            self.peek_timer.stop()
+            self.stop_peek()
+        elif self.peeking is not None:
+            if target != self.peeking:
+                self.start_peek(target)  # уже подглядываем — между миниатюрами переключаемся сразу
+        elif target != self.peek_target or not self.peek_timer.isActive():
+            self.peek_target = target
+            self.peek_timer.start()
+
+    def _start_peek(self):
+        if self.isVisible() and self.peek_target is not None:
+            self.start_peek(self.peek_target)
+
+    def start_peek(self, hwnd):
+        if live_peek(hwnd, int(self.winId())):
+            self.peeking = hwnd
+
+    def stop_peek(self):
+        self.peek_timer.stop()
+        self.peek_target = None
+        if self.peeking is not None:
+            self.peeking = None
+            live_peek(None)
 
     # -- mouse
     def hit(self, pos):
@@ -396,6 +432,7 @@ class WindowPreview(QWidget):
             return
         i, part = hit
         hwnd = self.hwnds[i]
+        self.stop_peek()  # клик — выходим из подглядывания до переключения или закрытия
         if part == "close":
             syscommand(hwnd, win32con.SC_CLOSE)
             item = self.item

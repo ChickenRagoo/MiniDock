@@ -333,6 +333,9 @@ class SettingsWindow(QWidget):
             self.slider("dock_preview", "Размер миниатюр", 140, 360, fmt="{:.0f} px"),
             self.slider("dock_preview_pad", "Толщина рамки", 2, 24, fmt="{:.0f} px"),
             self.slider("dock_preview_delay", "Задержка показа", 0, 1.5, scale=100, fmt="{:.2f} с"),
+            self.toggle("dock_peek", "Показывать окно целиком при наведении на миниатюру",
+                        "Как на панели задач Windows: окно встаёт на своё место, остальные становятся прозрачными. "
+                        "Мышь ушла с миниатюры — всё возвращается."),
             self.toggle("bounce", "Подпрыгивание при запуске"),
             self.combo("indicator", "Индикатор запущенных",
                        [("Точка", "dot"), ("Полоска", "line"), ("Нет", "none")]),

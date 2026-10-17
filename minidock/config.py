@@ -56,6 +56,7 @@ DEFAULT_CFG = {
     "dock_opacity": 95,           # 0..255 поверх размытия
     "dock_blur": True,
     "glass_live_parts": ["dock", "bar", "switcher", "previews", "spotlight", "folders", "menus"],  # где живое
+    "dock_peek": True,            # наведение на миниатюру окна над доком показывает окно целиком (как в Windows)
     "glass_live": True,           # живой фон «стекла» (лупа Windows), иначе — снимок в момент появления
     "glass_radius": 18,           # сила размытия
     "dock_radius": 0.3,           # скругление, доля размера иконки
