@@ -48,7 +48,7 @@ class FolderPopup(QWidget):
         self.folder = None
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="folders")
         self.hover = None
         self.font_label = QFont("Segoe UI", 9)
         self.title = QLineEdit(self)

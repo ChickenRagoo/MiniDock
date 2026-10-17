@@ -72,7 +72,7 @@ class Flyout(QWidget):
         self.lay = QVBoxLayout(self)
         self.lay.setContentsMargins(14, 12, 14, 14)
         self.lay.setSpacing(8)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="bar")
         self.glass.region = self.glass_region
 
     def clear(self):

@@ -265,8 +265,20 @@ def fade_in(widget, slide=0):
     widget._fade = animate(widget, 170, step)
 
 
-def make_glass(widget, live_ms=0):
+# Части интерфейса со «стеклом»: для каждой живое размытие включается отдельно (настройка glass_live_parts)
+GLASS_PARTS = (("dock", "Док"), ("bar", "Окна верхней панели"), ("switcher", "Alt+Tab"),
+               ("previews", "Миниатюры окон над доком"), ("spotlight", "Spotlight"), ("folders", "Папки"),
+               ("menus", "Контекстные меню"))
+
+
+def live_for(part):
+    """Живое размытие включено для этой части интерфейса?"""
+    return bool(GLASS.get("live", True)) and (part is None or part in GLASS.get("live_parts", (part,)))
+
+
+def make_glass(widget, live_ms=0, part=None):
     g = glass.Glass(widget, live_ms)
+    g.part = part
     g.enabled = GLASS["enabled"]
     return g
 
@@ -314,7 +326,7 @@ class MacMenu(QMenu):
         self.setWindowFlags(self.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet(MENU_QSS)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="menus")
 
     def sub(self, title):
         m = MacMenu(title, self)
@@ -367,6 +379,8 @@ class Toggle(QAbstractButton):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        if not self.isEnabled():
+            p.setOpacity(0.35)  # недоступный переключатель — бледный
         r = QRectF(1, 2, 38, 20)
         path = QPainterPath()
         path.addRoundedRect(r, 10, 10)

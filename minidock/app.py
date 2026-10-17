@@ -150,6 +150,7 @@ class App:
     def apply_layout(self):
         cfg = self.cfg
         GLASS["live"] = bool(cfg["glass_live"])
+        GLASS["live_parts"] = tuple(cfg["glass_live_parts"])
         GLASS["radius"] = float(cfg["glass_radius"])
         if cfg["replace_taskbar"]:
             self.taskbar.hide()

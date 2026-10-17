@@ -18,7 +18,7 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontM
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from .folders import FolderPopup, folder_pixmap
-from .ui import GLASS, TOP_FLAGS, MacMenu, lerp_rect, make_glass, popup_menu, precise_timer, smooth
+from .ui import GLASS, TOP_FLAGS, MacMenu, lerp_rect, live_for, make_glass, popup_menu, precise_timer, smooth
 from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, resolve_lnk, syscommand,
                      window_monitor)
 
@@ -133,7 +133,7 @@ class Dock(QWidget):
         self.trash = make_trash()
         self.launchpad = Item("launchpad", name="Launchpad", pixmap=launchpad_pixmap())
         self.icon_cache = {}
-        self.glass = make_glass(self)  # размытый фон: снимается в момент, когда док начинает выезжать
+        self.glass = make_glass(self, part="dock")  # размытый фон: снимается в момент, когда док начинает выезжать
         self.glass.region = self.glass_region
         self.glass.can_capture = self.glass_allowed
 
@@ -551,7 +551,7 @@ class Dock(QWidget):
     def apply_glass(self):
         # без автоскрытия док не уходит с экрана и фон под ним не переснять — тогда только тонировка
         # снимок фона возможен только пока дока нет на экране (значит, нужно автоскрытие); живой фон — всегда
-        live = GLASS.get("live", True)
+        live = live_for("dock")
         self.glass.enabled = GLASS["enabled"] and bool(self.cfg["dock_blur"]) and (bool(self.cfg["autohide"]) or live)
         if not self.glass.enabled or not live:
             self.glass.stop_live()

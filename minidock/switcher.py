@@ -228,7 +228,7 @@ class Switcher(QWidget):
         self.font_name = QFont("Segoe UI", 10, QFont.DemiBold)
         self.font_title = QFont("Segoe UI", 8)
         self.anim = precise_timer(self, 14, self.tick)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="switcher")
         self.thumbs = LiveThumbs()
 
     @property
@@ -726,7 +726,7 @@ class WinSwitcher(QWidget):
         self.active = False
         self.pad = 16.0
         self.font_title = QFont("Segoe UI", 9)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="switcher")
         self.thumbs = LiveThumbs()
 
     @property

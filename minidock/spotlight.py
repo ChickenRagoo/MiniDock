@@ -161,7 +161,7 @@ class Spotlight(QWidget):
         self.f_glyph = QFont(MDL2, 13)
         self.f_big = QFont("Segoe UI Light", 22)
         self.resize(WIDTH, TOP_H)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="spotlight")
         self.glass.region = self.glass_region
 
     # -- show / hide

@@ -81,8 +81,8 @@ class Glass(QObject):
     def start_live(self):
         """Включить живой фон, если он доступен и включён в настройках. True — включён."""
         from .livecapture import live_capture
-        from .ui import GLASS
-        if not self.enabled or not GLASS.get("live", True):
+        from .ui import live_for
+        if not self.enabled or not live_for(getattr(self, "part", None)):
             return False
         lc = live_capture()
         if lc is None:

@@ -235,7 +235,7 @@ class WindowPreview(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
-        self.glass = make_glass(self)
+        self.glass = make_glass(self, part="previews")
         self.thumbs = LiveThumbs()
         self.item = None
         self.hwnds = []

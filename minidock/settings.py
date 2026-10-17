@@ -12,7 +12,7 @@ from .barwidgets import WIDGETS_DIR
 from .config import CFG_DIR, DEFAULT_CFG
 from .updater import PAGE
 from .version import __version__
-from .ui import MDL2, Toggle, fade_in, rounded_path
+from .ui import GLASS_PARTS, MDL2, Toggle, fade_in, rounded_path
 from .winapi import autostart_enabled, enable_blur, round_window, set_autostart
 
 QSS = """
@@ -353,8 +353,33 @@ class SettingsWindow(QWidget):
             self.slider("dock_radius", "Скругление углов", 0, 0.5, scale=100, fmt="{:.2f}"),
             self.toggle("dock_border", "Светлая обводка"),
         ])
+        self.group(lay, self.live_parts_rows())
         lay.addStretch()
         return w
+
+    def live_parts_rows(self):
+        """Где включено живое размытие: отдельный переключатель для каждой части интерфейса."""
+        parts = set(self.cfg["glass_live_parts"])
+        rows, toggles = [], []
+        for key, title in GLASS_PARTS:
+            t = Toggle(key in parts)
+
+            def changed(on, key=key):
+                cur = [k for k in self.cfg["glass_live_parts"] if k != key]
+                self.app.set_cfg("glass_live_parts", cur + [key] if on else cur)
+            t.toggled.connect(changed)
+            toggles.append(t)
+            rows.append(self.row(title, t))
+        head = QLabel("Где размытие живое")
+        head.setObjectName("desc")
+        rows.insert(0, head)
+
+        def follow(on):  # без общего «Живое размытие» отдельные переключатели не действуют
+            for t in toggles:
+                t.setEnabled(bool(on))
+        self.controls["glass_live"].toggled.connect(follow)
+        follow(self.cfg["glass_live"])
+        return rows
 
     def page_anim(self):
         w, lay = self.page("Анимации")
