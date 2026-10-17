@@ -65,11 +65,13 @@ class Item:
 
     def pix_for(self, size_px):
         """Иконка, заранее уменьшенная качественным алгоритмом до нужного размера (без «пикселей»)."""
-        s = max(int(round(size_px / 2)) * 2, 2)
+        # размеры через 4 px и не больше 24 штук на иконку: при увеличении иконка рисуется во всех промежуточных
+        # размерах, а на двух мониторах с разным масштабом их вдвое больше — без этого кэш раздувался до сотен МБ
+        s = max(int(round(size_px / 4)) * 4, 4)
         pix = self.pix_cache.get(s)
         if pix is None:
-            if len(self.pix_cache) > 48:
-                self.pix_cache.clear()
+            if len(self.pix_cache) >= 24:
+                self.pix_cache.pop(next(iter(self.pix_cache)))
             pix = self.pix.scaled(s, s, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.pix_cache[s] = pix
         return pix
