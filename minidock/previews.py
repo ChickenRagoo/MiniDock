@@ -325,8 +325,8 @@ class WindowPreview(QWidget):
         prepare_glass(self.glass)
         self.show()
         self.raise_()
+        self.thumbs.fade_in(self)  # прозрачность 0 — до показа миниатюр, иначе первый кадр они видны целиком
         self.thumbs.show(self, self.tiles, self.paint_overlay, self.thumb_radius)
-        self.thumbs.fade_in(self)
 
     def close_preview(self):
         self.show_timer.stop()

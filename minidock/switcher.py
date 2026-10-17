@@ -404,8 +404,8 @@ class Switcher(QWidget):
         self.place()
         self.show()
         self.raise_()
+        self.thumbs.fade_in(self)  # прозрачность 0 — до показа миниатюр, иначе первый кадр они видны целиком
         self.update_thumbs()
-        self.thumbs.fade_in(self)
 
     def step(self, d):
         if not self.active or not self.apps:
@@ -803,8 +803,8 @@ class WinSwitcher(QWidget):
         self.place()
         self.show()
         self.raise_()
+        self.thumbs.fade_in(self)  # прозрачность 0 — до показа миниатюр, иначе первый кадр они видны целиком
         self.thumbs.show(self, self.tiles(), self.paint_overlay)
-        self.thumbs.fade_in(self)
 
     def changed(self):
         self.update()
