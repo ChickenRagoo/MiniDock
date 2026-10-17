@@ -406,12 +406,14 @@ class Dock(QWidget):
 
     # -- animation
     def at_screen_edge(self, gpos):
-        scr = self.screen().geometry()
+        # курсор должен быть на мониторе этого дока: иначе у мониторов одной высоты, стоящих рядом,
+        # нижний край одного «будит» доки на всех
+        scr = (self.home or QApplication.primaryScreen()).geometry()
         if self.side == "bottom":
-            return gpos.y() >= scr.bottom() - 1
+            return gpos.y() >= scr.bottom() - 1 and scr.left() <= gpos.x() <= scr.right()
         if self.side == "left":
-            return gpos.x() <= scr.left()
-        return gpos.x() >= scr.right() - 1
+            return gpos.x() <= scr.left() and scr.top() <= gpos.y() <= scr.bottom()
+        return gpos.x() >= scr.right() - 1 and scr.top() <= gpos.y() <= scr.bottom()
 
     def tick(self):
         now = time.monotonic()
