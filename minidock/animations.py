@@ -357,7 +357,8 @@ class WindowAnimator:
                          mode=self.cfg["minimize_effect"]):
             return None
         gpu = self.gpu_with(hwnd)
-        if gpu is None or not gpu.hold(hwnd):
+        if gpu is None or not all([g.hold(hwnd) for g in self.gpus_with(hwnd)]):
+            self.drop_held(hwnd)
             return None
         self.geo[hwnd] = g
         if snap[0].width() >= g[0][2] - g[0][0] - 2:
@@ -372,8 +373,8 @@ class WindowAnimator:
         if gpu is None:
             send()
             return
-        gpu.after_frames(2, send)  # кадр уже на экране — теперь можно прятать окно
-        QTimer.singleShot(1500, lambda: gpu.drop_held(hwnd))  # страховка: окно не свернулось
+        gpu.after_shown(hwnd, 2, send)  # стоп-кадр уже на экране — теперь можно прятать окно
+        QTimer.singleShot(1500, lambda: self.drop_held(hwnd))  # страховка: окно не свернулось
 
     def on_press(self, hwnd):
         """Кнопка мыши нажата в окне. Если это кнопки в правом верхнем углу — окно, скорее всего, сейчас
@@ -405,7 +406,7 @@ class WindowAnimator:
         if user32.GetAsyncKeyState(0x01) & 0x8000 and time.monotonic() - started < 10:
             QTimer.singleShot(30, lambda: self._watch_release(hwnd, gpu, started))
             return
-        QTimer.singleShot(250, lambda: gpu.drop_held(hwnd))  # свернулось — стоп-кадр уже пошёл в анимацию
+        QTimer.singleShot(250, lambda: self.drop_held(hwnd))  # свернулось — стоп-кадр уже пошёл в анимацию
 
     def gpu_for(self, rect):
         """Слой анимаций монитора, на котором центр rect (физические пиксели)."""
@@ -421,6 +422,14 @@ class WindowAnimator:
             if g.physical() and g.mon == mon:
                 return g
         return self.gpu
+
+    def gpus_with(self, hwnd):
+        """Все слои, где сейчас идёт анимация окна (у окна и иконки на разных мониторах — два)."""
+        return [g for g in self.gpus if g.busy_with(hwnd)]
+
+    def drop_held(self, hwnd):
+        for g in self.gpus:
+            g.drop_held(hwnd)
 
     def gpu_with(self, hwnd):
         return next((g for g in self.gpus if g.busy_with(hwnd)), None)
@@ -438,8 +447,14 @@ class WindowAnimator:
             return False
         dpr = QApplication.primaryScreen().devicePixelRatio()
         dock = int(self.dock_for(hwnd).winId())
-        if img is not None and self.gpu_for(icon).play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode,
-                                                       on_done, dpr, below=dock):
+        main = self.gpu_for(icon)
+        if img is not None and main.play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode,
+                                         on_done, dpr, below=dock):
+            # окно на другом мониторе, чем иконка: слой анимаций у каждого монитора свой — та же анимация
+            # и на слое монитора окна, иначе на нём окно просто пропадает (или «застревает» у края экрана)
+            other = self.gpu_for(frame)
+            if other is not main:
+                other.play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode, None, dpr)
             return True
         if DEBUG:
             print(f"fallback to DWM: img={'none' if img is None else img.size()} reverse={reverse}", flush=True)
@@ -482,7 +497,7 @@ class WindowAnimator:
             return
         if not is_app_window(hwnd, need_visible=False):
             return
-        if any(gp.begin_held(hwnd) for gp in self.gpus):  # стоп-кадр уже на месте окна — просто поехали
+        if any([gp.begin_held(hwnd) for gp in self.gpus]):  # стоп-кадр уже на месте окна — поехали (все слои)
             self.dock_for(hwnd).reveal(1.0)
             return
         g = window_geometry(hwnd) or self.geo.get(hwnd)
@@ -545,8 +560,7 @@ class WindowAnimator:
             if DEBUG:
                 print(f"refresh: fresh={fresh} snap={bool(snap)}", flush=True)
             if snap:
-                g = self.gpu_with(hwnd)
-                if g:
+                for g in self.gpus_with(hwnd):
                     g.update_image(hwnd, snap[0], fresh[0])
         QTimer.singleShot(50, refresh)
         return True

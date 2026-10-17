@@ -136,6 +136,8 @@ class GenieItem(QQuickItem):
             ctypes.memmove(int(geo.vertexData()), buf, ctypes.sizeof(buf))
             s["gn"].markDirty(QSGNode.DirtyGeometry)
             s["op"].setOpacity(opacity)
+            if a.get("drawn_at") is None:  # кадр с этой анимацией рисуется впервые (поток интерфейса ждёт)
+                a["drawn_at"] = self.owner.swaps
         return node
 
 
@@ -156,7 +158,7 @@ class GpuGenie:
         self.timer = precise_timer(None, 6, self.step)
         self.enabled = True
         self.swaps = 0        # кадров, выведенных на экран
-        self.waiters = []     # [номер кадра, колбэк] — «когда анимация уже видна на экране»
+        self.waiters = []     # [условие, крайний срок, колбэк] — «когда анимация уже видна на экране»
         # Счёт кадров — через очередь событий, а не прямо в потоке рендера: иначе поток рендера ждёт Python (GIL),
         # пока основной поток с GIL ждёт поток рендера в win.hide() — взаимная блокировка, MiniDock намертво зависал.
         self.win.frameSwapped.connect(self._swapped, Qt.QueuedConnection)
@@ -171,7 +173,17 @@ class GpuGenie:
 
     def after_frames(self, n, fn):
         """fn() в потоке интерфейса, когда на экран выйдет ещё n кадров анимации (но не позже чем через 0,2 с)."""
-        self.waiters.append([self.swaps + n, time.monotonic() + 0.2, fn])
+        target = self.swaps + n
+        self.waiters.append([lambda: self.swaps >= target, time.monotonic() + 0.2, fn])
+        self.timer.start()
+
+    def after_shown(self, hwnd, n, fn, timeout=0.5):
+        """fn(), когда анимация окна hwnd уже нарисована и после этого на экран вышло n кадров. Просто «n кадров»
+        не годится: первый кадр с новым снимком запаздывает (большую текстуру ещё грузят в видеокарту)."""
+        def shown():
+            return any(a["hwnd"] == hwnd and a.get("drawn_at") is not None and self.swaps >= a["drawn_at"] + n
+                       for a in self.anims)
+        self.waiters.append([shown, time.monotonic() + timeout, fn])
         self.timer.start()
 
     def place(self):
@@ -312,7 +324,7 @@ class GpuGenie:
 
     def step(self):
         now = time.monotonic()
-        for w in [w for w in self.waiters if self.swaps >= w[0] or now >= w[1]]:
+        for w in [w for w in self.waiters if w[0]() or now >= w[1]]:
             self.waiters.remove(w)
             w[2]()
         for a in list(self.anims):
