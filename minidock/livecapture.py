@@ -25,6 +25,7 @@ import numpy as np
 FPS = 30          # пока под окном что-то меняется
 IDLE_FPS = 8      # когда картинка под окном стоит на месте — снимаем реже и ничего не отдаём
 DOWNSCALE = 4
+BUCKET = 128      # окна лупы — размером, округлённым вверх до BUCKET: один и тот же размер служит многим окнам
 SLOTS = 8                     # одновременно живых окон («стёкол»)
 SLOT_SIZE = 1 << 20           # 1 МБ на кадр (уменьшенный в 4 раза участок экрана)
 HEADER = struct.Struct("<IIIiiii")  # номер кадра, ширина, высота, участок экрана (l, t, r, b)
@@ -112,30 +113,27 @@ class Magnifier:
         self._cb = SCALING_CB(self._on_image)
         self.parent_pid = parent_pid
         self.excluded = []
-        self.windows = {}  # ячейка -> (окно лупы, ширина, высота). Размер окна лупы НЕ меняем: Windows от
-        #                    этого падает — при новом размере окно лупы создаётся заново
+        # Окна лупы по размерам (округлённым до BUCKET), никогда не уничтожаются. Размер окна лупы менять нельзя —
+        # Windows падает, а уничтоженное окно лупы оставляет в памяти ~1,3 МБ (утечка в Magnification API):
+        # раньше при каждом открытии/росте всплывающего окна помощник прибавлял мегабайты, пока не занимал сотни.
+        self.pool = {}  # (ширина, высота) -> окно лупы
         self._got = None
-        if self._window(-1, 16, 16) is None:
+        if self._window(16, 16) is None:
             raise OSError("Magnifier")
 
-    def _window(self, slot, w, h):
-        cur = self.windows.get(slot)
-        if cur is not None and cur[1:] == (w, h):
-            return cur[0]
-        if cur is not None:
-            self.user32.DestroyWindow(cur[0])
-        hwnd = self.user32.CreateWindowExW(0, "Magnifier", "m", 0x40000000 | 0x10000000, 0, 0, w, h, self.host,
-                                           None, self.hinst, None)
+    def _window(self, w, h):
+        """Окно лупы не меньше w×h из пула: (окно, ширина, высота) или None."""
+        key = (-(-w // BUCKET) * BUCKET, -(-h // BUCKET) * BUCKET)
+        hwnd = self.pool.get(key)
+        if hwnd:
+            return hwnd, *key
+        hwnd = self.user32.CreateWindowExW(0, "Magnifier", "m", 0x40000000 | 0x10000000, 0, 0, key[0], key[1],
+                                           self.host, None, self.hinst, None)
         if not hwnd or not self.mag.MagSetImageScalingCallback(hwnd, self._cb):
-            self.windows.pop(slot, None)
             return None
-        self.windows[slot] = (hwnd, w, h)
+        self.pool[key] = hwnd
         self._apply_filter(hwnd)
-        return hwnd
-
-    def forget(self, keep):
-        for slot in [s for s in self.windows if s not in keep and s != -1]:
-            self.user32.DestroyWindow(self.windows.pop(slot)[0])
+        return hwnd, *key
 
     def _apply_filter(self, hwnd):
         arr = (wintypes.HWND * max(len(self.excluded), 1))(*self.excluded)
@@ -153,7 +151,7 @@ class Magnifier:
             return True
         self.user32.EnumWindows(ENUM_CB(cb), 0)
         self.excluded = mine[:64]
-        for hwnd, _, _ in self.windows.values():
+        for hwnd in self.pool.values():
             self._apply_filter(hwnd)
 
     def _on_image(self, hwnd, src, srch, dst, dsth, unclipped, clipped, dirty):
@@ -171,17 +169,20 @@ class Magnifier:
         w, h = r - l, b - t
         if w < DOWNSCALE or h < DOWNSCALE:
             return None
-        hwnd = self._window(slot, w, h)
-        if hwnd is None:
+        win = self._window(w, h)
+        if win is None:
             return None
+        hwnd, bw, bh = win
         self._got = None
-        self.mag.MagSetWindowSource(hwnd, wintypes.RECT(l, t, r, b))
+        # снимаем участок размером с окно лупы и обрезаем лишнее справа и снизу
+        self.mag.MagSetWindowSource(hwnd, wintypes.RECT(l, t, l + bw, t + bh))
         self.user32.InvalidateRect(hwnd, None, True)
         self.user32.UpdateWindow(hwnd)
         if self._got is None:
             return None
         data, gw, gh, stride = self._got
-        a = data.reshape(gh, stride // 4, 4)[:, :gw, :3]
+        gw, gh = min(gw, w), min(gh, h)
+        a = data.reshape(-1, stride // 4, 4)[:gh, :gw, :3]
         hh, ww = gh // DOWNSCALE, gw // DOWNSCALE
         a = a[:hh * DOWNSCALE, :ww * DOWNSCALE].astype(np.float32)
         return a.reshape(hh, DOWNSCALE, ww, DOWNSCALE, 3).mean(axis=(1, 3))
@@ -256,7 +257,6 @@ def helper_main(parent_pid):
         for slot in list(last):
             if slot not in current:
                 del last[slot]
-        mag.forget(current)
         still = 0 if changed else still + 1
         mag.pump()
         if not current:
