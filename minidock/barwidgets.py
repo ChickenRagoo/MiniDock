@@ -30,9 +30,10 @@ import time
 import traceback
 
 import psutil
-from PySide6.QtCore import QByteArray, QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QByteArray, QObject, QPointF, QRectF, Qt, QTime, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import (QComboBox, QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSpinBox,
+                               QTimeEdit, QVBoxLayout, QWidget)
 
 from .config import CFG_DIR
 from .flyouts import Flyout
@@ -181,6 +182,22 @@ class NetworkWidget(BarWidget):
 # (окна five_hour и seven_day: used_percentage и resets_at) — https://code.claude.com/docs/en/statusline.
 # Наш скрипт строки состояния сохраняет их в файл, виджет этот файл читает. Ни токенов, ни запросов в сеть.
 CLAUDE_USAGE = CFG_DIR / "claude_usage.json"
+# Калибровка по claude.ai/settings/usage: размер лимитов в токенах и начало недели (см. ClaudeWidget.calibrate)
+CLAUDE_CALIB = CFG_DIR / "claude_calib.json"
+
+
+def load_calib():
+    try:
+        with open(CLAUDE_CALIB, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_calib(data):
+    CFG_DIR.mkdir(parents=True, exist_ok=True)
+    _write_json(str(CLAUDE_CALIB), data)
 CLAUDE_HOOK = CFG_DIR / "claude_statusline.ps1"
 CLAUDE_HOOK_MARK = "MiniDock/claude_statusline.ps1"
 CLAUDE_HOOK_PS1 = r"""# MiniDock: сохраняет лимиты Claude (rate_limits из status line Claude Code) для виджета верхней панели
@@ -337,8 +354,13 @@ class ClaudeLog:
         self.offsets = {}   # путь -> сколько байт уже прочитано
         self.msgs = {}      # id ответа -> (время, ввод, вывод, запись в кэш, чтение из кэша)
         self.limits = []    # [(время отказа, тип окна, время сброса)]
+        self.lock = threading.Lock()  # журнал читает фоновый поток виджетов, калибровка — поток интерфейса
 
     def scan(self):
+        with self.lock:
+            self._scan()
+
+    def _scan(self):
         root = os.path.join(_claude_dir(), "projects")
         horizon = time.time() - self.KEEP
         for dirpath, _, files in os.walk(root):
@@ -397,20 +419,37 @@ class ClaudeLog:
         return m[1] + m[2] + m[3]
 
     def blocks(self):
-        """Окна по 5 часов, как их считает подписка: окно начинается с первого запроса (с точностью до часа)
-        после конца предыдущего. [(начало, конец, [ответы])]"""
+        """Окна по 5 часов, как их считает подписка: окно начинается с первого запроса после конца
+        предыдущего. [(начало, конец, [ответы])]"""
         out = []
         for m in sorted(self.msgs.values()):
             if not out or m[0] >= out[-1][1]:
-                start = m[0] - m[0] % 3600
+                start = m[0]
                 out.append((start, start + self.BLOCK, []))
             out[-1][2].append(m)
         return out
 
-    def summary(self):
+    def tokens_between(self, start, end):
+        with self.lock:
+            return sum(self.weight(m) for m in self.msgs.values() if start <= m[0] <= end)
+
+    @staticmethod
+    def week_start(anchor, now):
+        """Начало текущей недели лимитов: от известного сброса шагами по 7 дней."""
+        week = 7 * 86400
+        return anchor + ((now - anchor) // week) * week
+
+    def summary(self, calib=None):
+        with self.lock:
+            return self._summary(calib or {})
+
+    def _summary(self, calib):
         now = time.time()
         blocks = self.blocks()
         cur = blocks[-1] if blocks and blocks[-1][1] > now else None
+        reset5 = float(calib.get("five_reset") or 0)
+        if reset5 > now:  # время сброса сессии известно с claude.ai — окно ровно по нему
+            cur = (reset5 - self.BLOCK, reset5, [m for m in self.msgs.values() if reset5 - self.BLOCK <= m[0] <= now])
         # точное время сброса — из последнего отказа «лимит исчерпан», если он ещё в силе
         hit5 = next((r for t, k, r in reversed(self.limits) if k == "five_hour" and r > now), None)
         hit7 = next((r for t, k, r in reversed(self.limits) if k == "seven_day" and r > now), None)
@@ -425,7 +464,9 @@ class ClaudeLog:
                 break
         done = [b for b in blocks if b is not cur]
         record = max((sum(self.weight(m) for m in b[2]) for b in done), default=0)
-        week = [m for m in self.msgs.values() if m[0] >= now - 7 * 86400]
+        anchor = float(calib.get("week_anchor") or 0)
+        week_from = self.week_start(anchor, now) if anchor else now - 7 * 86400
+        week = [m for m in self.msgs.values() if m[0] >= week_from]
         # самая «тяжёлая» неделя: суммы по 7 дней подряд, закончившиеся до сегодняшнего дня
         day = 86400
         today = now - now % day
@@ -447,7 +488,7 @@ class ClaudeLog:
             week=sum(self.weight(m) for m in week),
             week_reads=sum(m[4] for m in week),
             week_count=len(week),
-            week_reset=hit7, week_hit=hit7 is not None,
+            week_reset=hit7 or (week_from + 7 * 86400 if anchor else None), week_hit=hit7 is not None,
         )
 
 
@@ -484,20 +525,45 @@ class ClaudeWidget(BarWidget):
         if not os.path.isdir(_claude_dir()):
             return dict(claude=False)
         self.log.scan()
-        return dict(claude=True, est=self.log.summary(), exact=self.exact(), hook=_claude_hook_state())
+        calib = load_calib()
+        return dict(claude=True, est=self.log.summary(calib), exact=self.exact(), hook=_claude_hook_state(),
+                    calib=calib)
 
     @staticmethod
     def paint_icon(p, rect):
         paint_claude_logo(p, rect)
 
+    def calibrate(self):
+        """Окно калибровки: проценты и время сброса с claude.ai/settings/usage -> размер лимитов в токенах."""
+        dlg = CalibrateDialog(load_calib())
+        if dlg.exec() != QDialog.Accepted:
+            return
+        now = time.time()
+        five_pct, five_reset, week_pct, week_reset = dlg.values()
+        calib = load_calib()
+        if five_pct > 0:
+            used = self.log.tokens_between(five_reset - ClaudeLog.BLOCK, now)
+            if used:
+                calib["five_cap"] = used / (five_pct / 100)
+        calib["five_reset"] = five_reset
+        week_from = week_reset - 7 * 86400
+        if week_pct > 0:
+            used = self.log.tokens_between(week_from, now)
+            if used:
+                calib["week_cap"] = used / (week_pct / 100)
+        calib.update(week_anchor=week_from, at=now, five_pct=five_pct, week_pct=week_pct)
+        save_calib(calib)
+
     def gauges(self, d):
         """[(доля 0..1 | None, точно ли)] для окна 5 часов и недели. Точные — из строки состояния claude,
         иначе оценка: от расхода до упора в лимит или от самого большого окна / недели за месяц."""
-        ex, e = d["exact"], d["est"]
+        ex, e, cal = d["exact"], d["est"], d.get("calib") or {}
         if "five_hour" in ex:
             five = (ex["five_hour"][0] / 100, True)
         elif e["five_hit"]:
             five = (1.0, True)
+        elif cal.get("five_cap"):
+            five = (e["five"] / cal["five_cap"], True)
         elif e["cap"] or e["record"]:
             # база — больший из «расхода до упора в лимит» и «самого большого окна за месяц»
             five = (e["five"] / max(e["cap"] or 0, e["record"], e["five"]), False)
@@ -507,6 +573,8 @@ class ClaudeWidget(BarWidget):
             week = (ex["seven_day"][0] / 100, True)
         elif e["week_hit"]:
             week = (1.0, True)
+        elif cal.get("week_cap"):
+            week = (e["week"] / cal["week_cap"], True)
         elif e["week_record"]:
             week = (e["week"] / max(e["week_record"], e["week"]), False)
         else:
@@ -539,9 +607,121 @@ class ClaudeWidget(BarWidget):
                 ("stats", [(_tokens(e["five"]), "за сессию"),
                            (_until(resets) if resets else "—", "до сброса"),
                            (str(e["five_count"]), "ответов")])]
-        note = "Точные данные из Claude Code" if ex else "Оценка по вашему расходу за месяц"
-        rows += [("text", note), ("button", "Точные лимиты на claude.ai", "https://claude.ai/settings/usage")]
+        cal = d.get("calib") or {}
+        if ex:
+            note = "Точные данные из Claude Code"
+        elif cal.get("five_cap") or cal.get("week_cap"):
+            when = datetime.datetime.fromtimestamp(float(cal.get("at") or time.time()))
+            note = f"По калибровке с claude.ai от {when.day} {MONTHS_GEN[when.month - 1]}"
+        else:
+            note = "Оценка по вашему расходу за месяц — откалибруйте"
+        rows += [("text", note), ("button", "Откалибровать по claude.ai…", self.calibrate),
+                 ("button", "Открыть лимиты на claude.ai", "https://claude.ai/settings/usage")]
         return rows
+
+
+MONTHS_GEN = ("янв.", "февр.", "марта", "апр.", "мая", "июня", "июля", "авг.", "сент.", "окт.", "нояб.", "дек.")
+DAYS_FULL = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+
+
+class CalibrateDialog(QDialog):
+    """Калибровка виджета Claude: два процента и два времени сброса со страницы claude.ai/settings/usage."""
+    QSS = """
+    QDialog { background: #222228; }
+    QLabel { color: #f2f2f5; font: 9pt 'Segoe UI'; }
+    QLabel#h { font: bold 11pt 'Segoe UI'; }
+    QLabel#dim { color: rgba(255, 255, 255, 140); font: 8pt 'Segoe UI'; }
+    QSpinBox, QComboBox, QTimeEdit { background: rgba(255, 255, 255, 18); color: #f2f2f5; border: none;
+        border-radius: 6px; padding: 5px 8px; font: 10pt 'Segoe UI'; min-width: 70px; }
+    QComboBox QAbstractItemView { background: #2a2a31; color: #f2f2f5; selection-background-color: #0a84ff; }
+    QPushButton { background: rgba(255, 255, 255, 22); color: #f2f2f5; border: none; border-radius: 7px;
+        padding: 7px 16px; font: 9pt 'Segoe UI'; }
+    QPushButton:hover { background: rgba(255, 255, 255, 40); }
+    QPushButton#ok { background: #d97757; }
+    QPushButton#ok:hover { background: #e2896b; }
+    """
+
+    def __init__(self, calib):
+        super().__init__(None, Qt.Dialog | Qt.WindowStaysOnTopHint | Qt.WindowCloseButtonHint)
+        self.setWindowTitle("Калибровка лимитов Claude")
+        self.setStyleSheet(self.QSS)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(10)
+        h = QLabel("Откройте claude.ai → Настройки → Использование")
+        h.setObjectName("h")
+        lay.addWidget(h)
+        hint = QLabel("и перенесите оттуда, сколько процентов использовано и когда сброс.")
+        hint.setObjectName("dim")
+        lay.addWidget(hint)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        now = datetime.datetime.now()
+        self.five = QSpinBox()
+        self.five.setRange(0, 100)
+        self.five.setSuffix(" %")
+        self.five_time = QTimeEdit()
+        self.five_time.setDisplayFormat("HH:mm")
+        old = float(calib.get("five_reset") or 0)
+        t = datetime.datetime.fromtimestamp(old) if old > time.time() else now + datetime.timedelta(hours=5)
+        self.five_time.setTime(QTime(t.hour, t.minute))
+        grid.addWidget(QLabel("Текущая сессия"), 0, 0)
+        grid.addWidget(self.five, 0, 1)
+        grid.addWidget(QLabel("сброс в"), 0, 2)
+        grid.addWidget(self.five_time, 0, 3)
+        self.week = QSpinBox()
+        self.week.setRange(0, 100)
+        self.week.setSuffix(" %")
+        self.week_day = QComboBox()
+        self.week_day.addItems(DAYS_FULL)
+        self.week_time = QTimeEdit()
+        self.week_time.setDisplayFormat("HH:mm")
+        anchor = float(calib.get("week_anchor") or 0)
+        if anchor:
+            a = datetime.datetime.fromtimestamp(anchor)
+            self.week_day.setCurrentIndex(a.weekday())
+            self.week_time.setTime(QTime(a.hour, a.minute))
+        else:
+            self.week_day.setCurrentIndex(now.weekday())
+            self.week_time.setTime(QTime(12, 0))
+        grid.addWidget(QLabel("Эта неделя"), 1, 0)
+        grid.addWidget(self.week, 1, 1)
+        grid.addWidget(QLabel("сброс"), 1, 2)
+        week_box = QHBoxLayout()
+        week_box.addWidget(self.week_day)
+        week_box.addWidget(self.week_time)
+        grid.addLayout(week_box, 1, 3)
+        lay.addLayout(grid)
+        note = QLabel("Чем больше процент, тем точнее калибровка. Лимит общий с чатами на claude.ai —\n"
+                      "их расход MiniDock не видит.")
+        note.setObjectName("dim")
+        lay.addWidget(note)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Отмена")
+        cancel.clicked.connect(self.reject)
+        ok = QPushButton("Откалибровать")
+        ok.setObjectName("ok")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        lay.addLayout(buttons)
+
+    def values(self):
+        """(% сессии, время сброса сессии, % недели, время ближайшего сброса недели)."""
+        now = datetime.datetime.now()
+        t = self.five_time.time()
+        five = now.replace(hour=t.hour(), minute=t.minute(), second=0, microsecond=0)
+        if five <= now:
+            five += datetime.timedelta(days=1)
+        t = self.week_time.time()
+        week = now.replace(hour=t.hour(), minute=t.minute(), second=0, microsecond=0)
+        week += datetime.timedelta(days=(self.week_day.currentIndex() - now.weekday()) % 7)
+        if week <= now:
+            week += datetime.timedelta(days=7)
+        return self.five.value(), five.timestamp(), self.week.value(), week.timestamp()
 
 
 BUILTIN = [SystemWidget, NetworkWidget, ClaudeWidget]
