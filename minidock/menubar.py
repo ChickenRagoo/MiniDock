@@ -239,8 +239,10 @@ class MenuBar(QWidget):
             items.append(("widget", host.bar_text(wid), (lambda r, wid=wid: self.toggle_widget(wid, r)), "w:" + wid))
         for kind, text, action, key in items:
             if kind == "widget":
-                glyph = host.classes[key[2:]].icon if key[2:] in host.classes else ""
-                gw = QFontMetricsF(self.f_icon).horizontalAdvance(glyph) + 6 if glyph else 0
+                cls = host.classes.get(key[2:])
+                painter = getattr(cls, "paint_icon", None)
+                glyph = "" if painter or cls is None else cls.icon
+                gw = 20 if painter else QFontMetricsF(self.f_icon).horizontalAdvance(glyph) + 6 if glyph else 0
                 # ширина растёт сразу, а сужается не раньше чем через несколько секунд — надпись не «дёргается»
                 tw = QFontMetricsF(self.f_mono).horizontalAdvance(text)
                 keep = self.widget_w.get(key)
@@ -250,7 +252,9 @@ class MenuBar(QWidget):
                 x -= w
                 r = add(x, w, action, key)
                 p.setPen(QColor(245, 245, 248))
-                if glyph:
+                if painter:  # свой значок (логотип) — квадрат по высоте текста
+                    painter(p, QRectF(r.left() + 8, r.center().y() - 7, 14, 14))
+                elif glyph:
                     p.setFont(self.f_icon)
                     p.drawText(QRectF(r.left() + 9, r.top(), gw, r.height()), Qt.AlignLeft | Qt.AlignVCenter, glyph)
                 p.setFont(self.f_mono)

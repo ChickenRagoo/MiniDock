@@ -30,8 +30,8 @@ import time
 import traceback
 
 import psutil
-from PySide6.QtCore import QObject, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter
+from PySide6.QtCore import QByteArray, QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from .config import CFG_DIR
@@ -55,6 +55,8 @@ class BarWidget:
 
     def panel(self, data):
         return []
+
+    paint_icon = None  # необязательно: функция (painter, QRectF) — свой значок вместо символа icon
 
 
 # -- встроенные -----------------------------------------------------------------------------------
@@ -297,11 +299,38 @@ def _parse_ts(s):
         return None
 
 
+CLAUDE_ORANGE = QColor(217, 119, 87)
+# Логотип Claude (контур из Simple Icons, CC0), закрашенный фирменным оранжевым
+CLAUDE_SVG = (b'<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path fill="#D97757" d="'
+              b"m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"
+              b'"/></svg>')
+_logo_cache = {}
+
+
+def paint_claude_logo(p, rect):
+    """Логотип Claude в rect: рисуется из SVG один раз на размер и дальше берётся из кэша."""
+    dpr = p.device().devicePixelRatioF() if p.device() else 1.0
+    side = max(1, round(min(rect.width(), rect.height()) * dpr))
+    pix = _logo_cache.get(side)
+    if pix is None:
+        from PySide6.QtSvg import QSvgRenderer
+        img = QImage(side, side, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        q = QPainter(img)
+        q.setRenderHint(QPainter.Antialiasing)
+        QSvgRenderer(QByteArray(CLAUDE_SVG)).render(q, QRectF(0, 0, side, side))
+        q.end()
+        pix = _logo_cache[side] = QPixmap.fromImage(img)
+        pix.setDevicePixelRatio(dpr)
+    s = side / dpr
+    p.drawPixmap(QPointF(rect.center().x() - s / 2, rect.center().y() - s / 2), pix)
+
+
 class ClaudeLog:
     """Расход Claude Code по его локальным журналам (~/.claude/projects/**/*.jsonl): у каждого ответа модели
     там записано, сколько токенов ушло. Первый раз читаем журналы за 8 дней целиком, дальше — только
     дописанное. Отказы «лимит исчерпан» (quotaLimits) дают точное время сброса и калибруют оценку."""
-    KEEP = 8 * 86400
+    KEEP = 31 * 86400  # месяц — чтобы было с чем сравнивать неделю
     BLOCK = 5 * 3600
 
     def __init__(self):
@@ -397,6 +426,16 @@ class ClaudeLog:
         done = [b for b in blocks if b is not cur]
         record = max((sum(self.weight(m) for m in b[2]) for b in done), default=0)
         week = [m for m in self.msgs.values() if m[0] >= now - 7 * 86400]
+        # самая «тяжёлая» неделя: суммы по 7 дней подряд, закончившиеся до сегодняшнего дня
+        day = 86400
+        today = now - now % day
+        days = {}
+        for m in self.msgs.values():
+            d = m[0] - m[0] % day
+            days[d] = days.get(d, 0) + self.weight(m)
+        week_record = 0
+        for end in range(int(today), int(today - 24 * day), -day):
+            week_record = max(week_record, sum(days.get(end - k * day, 0) for k in range(1, 8)))
         cur_msgs = cur[2] if cur else []
         return dict(
             five=sum(self.weight(m) for m in cur_msgs),
@@ -404,7 +443,7 @@ class ClaudeLog:
             five_count=len(cur_msgs),
             five_reset=hit5 or (cur[1] if cur else None),
             five_hit=hit5 is not None,
-            cap=cap, record=record,
+            cap=cap, record=record, week_record=week_record,
             week=sum(self.weight(m) for m in week),
             week_reads=sum(m[4] for m in week),
             week_count=len(week),
@@ -415,7 +454,7 @@ class ClaudeLog:
 class ClaudeWidget(BarWidget):
     id = "claude"
     name = "Claude — расход за 5 часов и неделю"
-    icon = ""  # спидометр
+    icon = ""  # значок — логотип Claude, рисуется в paint_icon
     interval = 15.0
 
     WINDOWS = (("five_hour", "5ч", "Сессия (5 часов)"), ("seven_day", "нед", "Неделя"))
@@ -447,70 +486,61 @@ class ClaudeWidget(BarWidget):
         self.log.scan()
         return dict(claude=True, est=self.log.summary(), exact=self.exact(), hook=_claude_hook_state())
 
+    @staticmethod
+    def paint_icon(p, rect):
+        paint_claude_logo(p, rect)
+
+    def gauges(self, d):
+        """[(доля 0..1 | None, точно ли)] для окна 5 часов и недели. Точные — из строки состояния claude,
+        иначе оценка: от расхода до упора в лимит или от самого большого окна / недели за месяц."""
+        ex, e = d["exact"], d["est"]
+        if "five_hour" in ex:
+            five = (ex["five_hour"][0] / 100, True)
+        elif e["five_hit"]:
+            five = (1.0, True)
+        elif e["cap"] or e["record"]:
+            # база — больший из «расхода до упора в лимит» и «самого большого окна за месяц»
+            five = (e["five"] / max(e["cap"] or 0, e["record"], e["five"]), False)
+        else:
+            five = (None, False)
+        if "seven_day" in ex:
+            week = (ex["seven_day"][0] / 100, True)
+        elif e["week_hit"]:
+            week = (1.0, True)
+        elif e["week_record"]:
+            week = (e["week"] / max(e["week_record"], e["week"]), False)
+        else:
+            week = (None, False)
+        return five, week
+
+    @staticmethod
+    def pct(g):
+        return "—" if g[0] is None else f"{min(g[0], 1.0) * 100:.0f}%"
+
     def text(self, d):
         if not d.get("claude"):
-            return "Claude"
-        ex, e = d["exact"], d["est"]
-        if ex:
-            return " · ".join(f"{short} {ex[k][0]:.0f}%" for k, short, _ in self.WINDOWS if k in ex)
-        if e["five_hit"]:
-            five = "лимит"
-        elif e["cap"]:
-            five = f"≈{min(e['five'] / e['cap'] * 100, 100):.0f}%"
-        else:
-            five = _tokens(e["five"])
-        return f"5ч {five} · нед {_tokens(e['week'])}"
+            return "—"
+        five, week = self.gauges(d)
+        return f"{self.pct(five)} · {self.pct(week)}"
 
     def panel(self, d):
-        rows = [("title", "Расход Claude")]
         if not d.get("claude"):
-            return rows + [("text", "Claude Code на этом компьютере не найден"),
-                           ("button", "Лимиты на claude.ai…", "https://claude.ai/settings/usage")]
+            return [("title", "Claude"), ("text", "Claude Code на этом компьютере не найден"),
+                    ("button", "Лимиты на claude.ai", "https://claude.ai/settings/usage")]
         ex, e = d["exact"], d["est"]
-        # окно 5 часов
-        if "five_hour" in ex:
-            used = ex["five_hour"][0]
-            rows.append(("bar", "Сессия (5 часов)", used / 100, f"{used:.0f}%"))
-        elif e["five_hit"]:
-            rows.append(("bar", "Сессия (5 часов)", 1.0, "лимит исчерпан"))
-        elif e["cap"]:
-            frac = min(e["five"] / e["cap"], 1.0)
-            rows.append(("bar", "Сессия (5 часов), оценка", frac, f"≈{frac * 100:.0f}%  ·  {_tokens(e['five'])}"))
-        else:
-            frac = e["five"] / e["record"] if e["record"] else 0.0
-            rows.append(("bar", "Сессия (5 часов)", min(frac, 1.0), _tokens(e["five"])))
+        five, week = self.gauges(d)
         resets = ex["five_hour"][1] if "five_hour" in ex else e["five_reset"]
-        if resets:
-            rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)))
-        else:
-            rows.append(("value", "Сейчас окна нет", "начнётся с запроса"))
-        rows.append(("value", "Ответов в окне", f"{e['five_count']}  ·  вывод {_tokens(e['five_out'])}"))
-        # неделя
-        rows.append(("sep",))
-        if "seven_day" in ex:
-            used, resets = ex["seven_day"]
-            rows.append(("bar", "Неделя", used / 100, f"{used:.0f}%"))
-            if resets:
-                rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)))
-        else:
-            rows.append(("value", "За 7 дней", f"{_tokens(e['week'])}  ·  {e['week_count']} ответов"))
-            if e["week_hit"]:
-                rows.append(("value", f"Недельный лимит, сброс через {_until(e['week_reset'])}",
-                             _at(e["week_reset"])))
-        rows.append(("value", "Чтение из кэша за 7 дней", _tokens(e["week_reads"])))
-        rows.append(("sep",))
-        if ex:
-            rows.append(("text", "Проценты — из строки состояния Claude Code в терминале"))
-        elif e["cap"]:
-            rows.append(("text", "Оценка по журналам: 100% — расход до последнего упора в лимит"))
-        else:
-            rows.append(("text", "По журналам Claude Code; полоса — доля от самого большого окна"))
-        rows.append(("text", "Считаются ввод, вывод и запись в кэш"))
-        rows.append(("button", "Точные лимиты на claude.ai…", "https://claude.ai/settings/usage"))
-        if d["hook"] == "ours":
-            rows.append(("button", "Отключить строку состояния claude", claude_disconnect))
-        elif d["hook"] == "none":
-            rows.append(("button", "Точные % из терминального claude", claude_connect))
+        week_reset = ex["seven_day"][1] if "seven_day" in ex else e["week_reset"]
+        rows = [("title", "Claude"),
+                ("rings", [("Сессия · 5 часов", five[0], self.pct(five),
+                            f"сброс в {_at(resets)}" if resets else "окно не начато"),
+                           ("Неделя", week[0], self.pct(week),
+                            f"сброс {_at(week_reset)}" if week_reset else f"{_tokens(e['week'])} токенов")]),
+                ("stats", [(_tokens(e["five"]), "за сессию"),
+                           (_until(resets) if resets else "—", "до сброса"),
+                           (str(e["five_count"]), "ответов")])]
+        note = "Точные данные из Claude Code" if ex else "Оценка по вашему расходу за месяц"
+        rows += [("text", note), ("button", "Точные лимиты на claude.ai", "https://claude.ai/settings/usage")]
         return rows
 
 
@@ -710,7 +740,16 @@ class WidgetHost(QObject):
 
 # -- окно виджета ---------------------------------------------------------------------------------
 
-ROW_H = {"title": 26, "text": 20, "value": 24, "bar": 40, "sep": 13, "button": 34}
+ROW_H = {"title": 26, "text": 20, "value": 24, "bar": 40, "sep": 13, "button": 34, "rings": 156, "stats": 62}
+
+
+def _level_color(frac, base=QColor(10, 132, 255)):
+    """Цвет заполнения: обычный, жёлтый от 75%, красный от 90%."""
+    if frac is not None and frac >= 0.9:
+        return QColor(255, 95, 87)
+    if frac is not None and frac >= 0.75:
+        return QColor(255, 189, 46)
+    return base
 
 
 class PanelView(QWidget):
@@ -736,6 +775,9 @@ class PanelView(QWidget):
         old = {i: v for i, v in self.shown.items()}
         self.rows = rows
         targets = {i: max(0.0, min(1.0, float(r[2] or 0))) for i, r in enumerate(rows) if r[0] == "bar"}
+        for i, r in enumerate(rows):
+            if r[0] == "rings":
+                targets.update({(i, k): max(0.0, min(1.0, float(g[1] or 0))) for k, g in enumerate(r[1])})
         start = {i: old.get(i, 0.0) for i in targets}
 
         def step(k):
@@ -794,6 +836,10 @@ class PanelView(QWidget):
                     color = QColor(255, 95, 87) if target >= 0.9 else QColor(255, 189, 46) if target >= 0.75 \
                         else QColor(10, 132, 255)
                     p.fillPath(rounded_path(QRectF(0, y + 24, max(8.0, w * frac), 8), 4), color)
+            elif kind == "rings":
+                self.paint_rings(p, i, r[1], y, w)
+            elif kind == "stats":
+                self.paint_stats(p, r[1], y, w)
             elif kind == "sep":
                 p.setPen(QColor(255, 255, 255, 30))
                 p.drawLine(0, int(y + h / 2), w, int(y + h / 2))
@@ -805,6 +851,51 @@ class PanelView(QWidget):
                 p.setPen(QColor(245, 245, 248))
                 p.drawText(rect.adjusted(10, 0, -10, 0), Qt.AlignLeft | Qt.AlignVCenter, str(r[1]))
             y += h
+
+    def paint_rings(self, p, i, rings, y, w):
+        """Круговые шкалы рядом: процент в центре, подпись и мелкий текст под кольцом."""
+        n = max(len(rings), 1)
+        cell = w / n
+        d = 96.0
+        for k, (label, frac, center, caption) in enumerate(rings):
+            cx = cell * k + cell / 2
+            box = QRectF(cx - d / 2, y + 8, d, d)
+            pen = QPen(QColor(255, 255, 255, 28), 9)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawEllipse(box)
+            shown = self.shown.get((i, k), 0.0)
+            if frac is not None and shown > 0.004:
+                pen.setColor(_level_color(frac, CLAUDE_ORANGE))
+                p.setPen(pen)
+                p.drawArc(box, 90 * 16, -int(360 * 16 * shown))
+            p.setFont(QFont("Segoe UI Semibold", 17))
+            p.setPen(QColor(250, 250, 252))
+            p.drawText(box, Qt.AlignCenter, center)
+            p.setFont(self.f_reg)
+            p.setPen(QColor(255, 255, 255, 215))
+            p.drawText(QRectF(cell * k, y + 112, cell, 18), Qt.AlignCenter, self.elide(self.f_reg, label, cell - 8))
+            p.setFont(self.f_text)
+            p.setPen(QColor(255, 255, 255, 130))
+            p.drawText(QRectF(cell * k, y + 130, cell, 16), Qt.AlignCenter, self.elide(self.f_text, caption, cell - 8))
+
+    def paint_stats(self, p, stats, y, w):
+        """Ряд плиток «число + подпись»."""
+        n = max(len(stats), 1)
+        gap = 8.0
+        tw = (w - gap * (n - 1)) / n
+        for k, (value, label) in enumerate(stats):
+            r = QRectF(k * (tw + gap), y + 6, tw, 50)
+            p.fillPath(rounded_path(r, 9), QColor(255, 255, 255, 14))
+            p.setFont(QFont("Segoe UI Semibold", 11))
+            p.setPen(QColor(245, 245, 248))
+            p.drawText(QRectF(r.left(), r.top() + 6, r.width(), 22), Qt.AlignCenter,
+                       self.elide(p.font(), value, r.width() - 8))
+            p.setFont(self.f_text)
+            p.setPen(QColor(255, 255, 255, 130))
+            p.drawText(QRectF(r.left(), r.top() + 28, r.width(), 16), Qt.AlignCenter,
+                       self.elide(self.f_text, label, r.width() - 8))
 
     @staticmethod
     def elide(font, text, width):
