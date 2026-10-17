@@ -429,6 +429,9 @@ class Dock(QWidget):
                 self.last_seen = now
             if now - self.last_seen > float(self.cfg["autohide_delay"]):
                 target_hide = 1.0
+        if self.blocked():
+            target_hide = 1.0  # открыт Launchpad — док уезжает за край и не отзывается
+            self.last_seen = 0.0
         changed = False
         if self.glass.enabled and self.hide_k < 0.99 and self.isVisible():
             if not self.glass.live_on and self.glass.start_live():
@@ -507,9 +510,14 @@ class Dock(QWidget):
         if not self.anim.isActive():
             self.anim.start()
 
+    def blocked(self):
+        """Пока открыт Launchpad, доком пользоваться нельзя."""
+        lp = self.app.launchpad
+        return lp.isVisible() and not lp.closing
+
     def idle_check(self):
         """Лёгкая проверка в простое (20 раз в секунду): не пора ли проснуться."""
-        if self.anim.isActive() or not self.isVisible():
+        if self.anim.isActive() or not self.isVisible() or self.blocked():
             return
         now = time.monotonic()
         gpos = QCursor.pos()
@@ -704,6 +712,8 @@ class Dock(QWidget):
         return self.press_item in self.pinned and uv.y() > self.bg.bottom() + self.B * 1.1
 
     def mousePressEvent(self, e):
+        if self.blocked():
+            return
         self.wake()
         self.app.preview.close_preview()
         if e.button() == Qt.LeftButton:
@@ -907,6 +917,8 @@ class Dock(QWidget):
 
     # -- context menu
     def contextMenuEvent(self, e):
+        if self.blocked():
+            return
         it = self.item_at(self.to_uv(QPointF(e.pos())))
         m = MacMenu(parent=self)
         if it is not None and it.kind == "folder":

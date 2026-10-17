@@ -10,7 +10,7 @@ import psutil
 import win32con
 import win32gui
 import win32process
-from PySide6.QtCore import QDate, QLocale, QRectF, QSize, Qt, QTimer
+from PySide6.QtCore import QDate, QLocale, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
                            QTextCharFormat)
 from PySide6.QtWidgets import (QApplication, QCalendarWidget, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QCalendarWidget, QFrame, QGridLayou
 from . import audio
 from .livecapture import blur_bgra
 from .media import MediaWatcher
-from .ui import MDL2, fade_in, make_glass, prepare_glass, rounded_path
+from .ui import MDL2, animate, fade_in, make_glass, prepare_glass, rounded_path
 from .winapi import (enable_blur, file_icon, force_foreground, kernel32, keyboard_layouts, lang_name, press_keys,
                      round_window, shell_icon_image, tray_click, tray_icons, try_foreground, user32)
 
@@ -368,84 +368,238 @@ def blurred(img, size, radius=18):
     return QImage(out.data, w, h, w * 4, QImage.Format_RGB32).copy()
 
 
-class MediaCard(QWidget):
-    """Карточка плеера: размытая обложка фоном, обложка со значком программы, название, исполнитель, кнопки."""
-    H = 122
+class SegPair(QWidget):
+    """Две склеенные кнопки «♫ для музыки и игр | ☎ для звонков» с плавным перетеканием цвета."""
+    clicked = Signal(bool)  # True — нажата «для звонков»
+    ON = QColor(92, 150, 166)
+    W, H = 54, 24
 
-    def __init__(self, info, watcher):
+    def __init__(self, media, comm):
         super().__init__()
-        self.info, self.watcher = info, watcher
-        self.setFixedHeight(self.H)
-        self.cover = QImage.fromData(info["cover"]) if info["cover"] else QImage()
-        self.bg = None
-        self.icon = app_icon(info["app"])
-        self.f_title = QFont("Segoe UI", 13, QFont.DemiBold)
-        self.f_artist = QFont("Segoe UI", 9)
-        self.buttons = []
-        for glyph, action in ((GLYPH_PREV, "prev"), (GLYPH_PAUSE if info["playing"] else GLYPH_PLAY, "toggle"),
-                              (GLYPH_NEXT, "next")):
-            b = QPushButton(glyph, self)
-            b.setObjectName("play")
-            b.setCursor(Qt.PointingHandCursor)
-            b.clicked.connect(lambda _=False, a=action: watcher.control(info["id"], a))
-            self.buttons.append(b)
+        self.setFixedSize(self.W, self.H)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setMouseTracking(True)
+        self.state = [bool(media), bool(comm)]
+        self.k = [float(media), float(comm)]  # анимированная заливка каждой половины
+        self.hover = None
+        self.font = QFont(MDL2, 9)
 
-    def resizeEvent(self, e):
-        self.bg = None
-        x0 = self.H - 8 + (self.width() - self.H) / 2
-        for i, b in enumerate(self.buttons):
-            b.move(int(x0 + (i - 1) * 54 - 16), self.H - 46)
+    def set_state(self, media, comm):
+        new = [bool(media), bool(comm)]
+        if new == self.state:
+            return
+        start, self.state = list(self.k), new
+
+        def step(v):
+            self.k = [s + (float(t) - s) * v for s, t in zip(start, new)]
+            self.update()
+        self._anim = animate(self, 220, step)
+
+    def half(self, x):
+        return 1 if x >= self.W / 2 else 0
+
+    def mouseMoveEvent(self, e):
+        h = self.half(e.position().x())
+        if h != self.hover:
+            self.hover = h
+            self.update()
+
+    def leaveEvent(self, e):
+        self.hover = None
+        self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit(bool(self.half(e.position().x())))
 
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.SmoothPixmapTransform)
-        card = rounded_path(self.rect(), 12)
+        outer = rounded_path(QRectF(self.rect()), 7)
+        p.fillPath(outer, QColor(255, 255, 255, 14))
+        for i, glyph in enumerate((GLYPH_MUSIC, GLYPH_PHONE)):
+            r = QRectF(i * self.W / 2, 0, self.W / 2, self.H)
+            p.save()
+            p.setClipRect(r)
+            c = QColor(self.ON)
+            c.setAlpha(int(235 * self.k[i]))
+            p.fillPath(outer, c)
+            if self.hover == i:
+                p.fillPath(outer, QColor(255, 255, 255, 30))
+            p.restore()
+            p.setFont(self.font)
+            p.setPen(QColor(255, 255, 255, int(170 + 85 * self.k[i])))
+            p.drawText(r, Qt.AlignCenter, glyph)
+        p.setPen(QPen(QColor(255, 255, 255, 50), 1))
+        p.drawPath(outer)
+        p.drawLine(QPointF(self.W / 2, 3), QPointF(self.W / 2, self.H - 3))
+
+
+class Collapsible(QWidget):
+    """Блок, который плавно раскрывается и сворачивается по высоте (окно растёт вместе с ним)."""
+
+    def __init__(self, on_step):
+        super().__init__()
+        self.on_step = on_step
+        self.box = QVBoxLayout(self)
+        self.box.setContentsMargins(0, 0, 0, 0)
+        self.box.setSpacing(6)
+        self.open = False
+        self.setMaximumHeight(0)
+
+    def toggle(self, open_, done=None):
+        self.open = open_
+        self.box.activate()
+        # от текущей видимой высоты (а не от «без ограничения», которое ставится после раскрытия)
+        start = min(self.maximumHeight(), self.height()) if self.isVisible() else 0
+        end = 0
+        if open_:  # полная высота содержимого: пока блок сжат до нуля, раскладка её не считает
+            self.setMaximumHeight(16777215)
+            self.box.activate()
+            end = self.box.totalSizeHint().height()
+            self.setMaximumHeight(start)
+
+        def step(v):
+            self.setMaximumHeight(int(start + (end - start) * v))
+            self.on_step()
+
+        def finished():
+            if open_:
+                self.setMaximumHeight(16777215)
+            self.on_step()
+            if done:
+                done()
+        self._anim = animate(self, 220, step, finished)
+
+
+class MediaCard(QWidget):
+    """Карточка плеера: размытая обложка фоном, обложка со значком программы, название, исполнитель, кнопки.
+    Новые данные (другой трек) плавно проступают поверх старых — карточка не пересоздаётся."""
+    H = 122
+
+    def __init__(self, info, watcher):
+        super().__init__()
+        self.watcher = watcher
+        self.setFixedHeight(0)  # появляется, плавно раскрываясь
+        self.f_title = QFont("Segoe UI", 13, QFont.DemiBold)
+        self.f_artist = QFont("Segoe UI", 9)
+        self.layers = []   # [(инфо, обложка, размытый фон)] — старый слой гаснет, новый проступает
+        self.fade = 1.0
+        self.appear = 0.0
+        self.icon = app_icon(info["app"])
+        self.buttons = []
+        for glyph, action in ((GLYPH_PREV, "prev"), (GLYPH_PLAY, "toggle"), (GLYPH_NEXT, "next")):
+            b = QPushButton(glyph, self)
+            b.setObjectName("play")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, a=action: self.watcher.control(self.info["id"], a))
+            self.buttons.append(b)
+        self.set_info(info, animated=False)
+
+    def set_info(self, info, animated=True):
+        self.info = info
+        self.buttons[1].setText(GLYPH_PAUSE if info["playing"] else GLYPH_PLAY)
+        key = (info["title"], info["artist"], bool(info["cover"]))
+        if self.layers and self.layers[-1][0] == key:
+            return
+        cover = QImage.fromData(info["cover"]) if info["cover"] else QImage()
+        self.layers = self.layers[-1:] + [(key, info, cover, None)]
+        if not animated or len(self.layers) == 1:
+            self.layers = self.layers[-1:]
+            self.update()
+            return
+        self.fade = 0.0
+
+        def step(v):
+            self.fade = v
+            self.update()
+        self._fade_anim = animate(self, 350, step, lambda: setattr(self, "layers", self.layers[-1:]))
+
+    def show_animated(self, on_step):
+        def step(v):
+            self.appear = v
+            self.setFixedHeight(int(self.H * v))
+            on_step()
+        self._appear_anim = animate(self, 260, step)
+
+    def hide_animated(self, on_step, done):
+        start = self.height()
+
+        def step(v):
+            self.appear = 1 - v
+            self.setFixedHeight(int(start * (1 - v)))
+            on_step()
+        self._appear_anim = animate(self, 220, step, done)
+
+    def resizeEvent(self, e):
+        self.layers = [(k, i, c, None) for k, i, c, _ in self.layers]  # фон под новый размер
+        x0 = self.H - 8 + (self.width() - self.H) / 2
+        for i, b in enumerate(self.buttons):
+            b.move(int(x0 + (i - 1) * 54 - 16), self.H - 46)
+
+    def paint_layer(self, p, i, opacity):
+        key, info, cover, bg = self.layers[i]
+        p.setOpacity(opacity * self.appear)
+        card = rounded_path(QRectF(0, 0, self.width(), self.H), 12)
+        p.save()
         p.setClipPath(card)
-        if not self.cover.isNull():
-            if self.bg is None:
-                self.bg = blurred(self.cover, self.size())
-            p.drawImage(QRectF(self.rect()), self.bg, QRectF(self.bg.rect()))
+        if not cover.isNull():
+            if bg is None:
+                bg = blurred(cover, QSize(self.width(), self.H))
+                self.layers[i] = (key, info, cover, bg)
+            p.drawImage(QRectF(0, 0, self.width(), self.H), bg, QRectF(bg.rect()))
             p.fillRect(self.rect(), QColor(10, 10, 16, 120))
         else:
             p.fillRect(self.rect(), QColor(255, 255, 255, 22))
-        p.setClipping(False)
-        p.setPen(QColor(255, 255, 255, 40))
-        p.drawPath(card)
+        p.restore()
         art = QRectF(10, 10, self.H - 20, self.H - 20)
         ap = rounded_path(art, 9)
-        if not self.cover.isNull():
+        if not cover.isNull():
             p.save()
             p.setClipPath(ap)
-            c = self.cover
-            side = min(c.width(), c.height())
-            src = QRectF((c.width() - side) / 2, (c.height() - side) / 2, side, side)
-            p.drawImage(art, c, src)
+            side = min(cover.width(), cover.height())
+            p.drawImage(art, cover, QRectF((cover.width() - side) / 2, (cover.height() - side) / 2, side, side))
             p.restore()
         else:
             p.fillPath(ap, QColor(255, 255, 255, 30))
             p.setFont(QFont(MDL2, 26))
             p.setPen(QColor(255, 255, 255, 160))
             p.drawText(art, Qt.AlignCenter, GLYPH_MUSIC)
-        if self.icon is not None and not self.icon.isNull():
-            badge = QRectF(art.right() - 30, art.bottom() - 30, 26, 26)
-            p.drawPixmap(badge, self.icon, QRectF(self.icon.rect()))
         text = QRectF(art.right() + 10, 14, self.width() - art.right() - 20, 30)
         p.setFont(self.f_title)
         p.setPen(QColor(255, 255, 255))
-        fm = QFontMetricsF(self.f_title)
         p.drawText(text, Qt.AlignHCenter | Qt.AlignVCenter,
-                   fm.elidedText(self.info["title"] or "Без названия", Qt.ElideRight, text.width()))
+                   QFontMetricsF(self.f_title).elidedText(info["title"] or "Без названия", Qt.ElideRight, text.width()))
         p.setFont(self.f_artist)
         p.setPen(QColor(255, 255, 255, 200))
-        fa = QFontMetricsF(self.f_artist)
         sub = QRectF(text.left(), text.bottom(), text.width(), 20)
-        p.drawText(sub, Qt.AlignHCenter | Qt.AlignVCenter, fa.elidedText(self.info["artist"], Qt.ElideRight, sub.width()))
+        p.drawText(sub, Qt.AlignHCenter | Qt.AlignVCenter,
+                   QFontMetricsF(self.f_artist).elidedText(info["artist"], Qt.ElideRight, sub.width()))
+
+    def paintEvent(self, _):
+        if not self.layers or self.height() < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        if len(self.layers) > 1:
+            self.paint_layer(p, 0, 1.0)
+            self.paint_layer(p, len(self.layers) - 1, self.fade)
+        else:
+            self.paint_layer(p, 0, 1.0)
+        p.setOpacity(self.appear)
+        art = QRectF(10, 10, self.H - 20, self.H - 20)
+        if self.icon is not None and not self.icon.isNull():
+            p.drawPixmap(QRectF(art.right() - 30, art.bottom() - 30, 26, 26), self.icon, QRectF(self.icon.rect()))
+        p.setPen(QColor(255, 255, 255, 40))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(rounded_path(QRectF(0, 0, self.width(), self.H), 12))
 
 
 class VolumeFlyout(Flyout):
     """Звук в стиле Seelen UI: общая громкость и микрофон, громкость программ, выбор устройств вывода и ввода
-    (отдельно для музыки и для связи), карточки всего, что сейчас играет."""
+    (отдельно для музыки и для связи), карточки всего, что сейчас играет. Окно собирается один раз при
+    открытии, дальше всё меняется на месте и с анимацией."""
     WIDTH = 400
     watcher = None
 
@@ -455,12 +609,10 @@ class VolumeFlyout(Flyout):
         if VolumeFlyout.watcher is None:
             VolumeFlyout.watcher = MediaWatcher()
         self.watcher.sessions.connect(self.on_media)
-        self.media_box = None
-        self.media_state = None
-        self.apps_open = False
         self.media_timer = QTimer(self, interval=1500, timeout=self.watcher.refresh)
+        self.cards = {}
 
-    # -- построение
+    # -- построение (один раз при открытии)
     def section(self, text):
         lab = QLabel(text)
         lab.setObjectName("section")
@@ -472,78 +624,126 @@ class VolumeFlyout(Flyout):
         f.setStyleSheet("background: rgba(255, 255, 255, 30);")
         return f
 
-    def icon_button(self, glyph, cb, checkable=False):
+    def icon_button(self, glyph, cb, checkable=False, name="ico"):
         b = QPushButton(glyph)
-        b.setObjectName("ico")
+        b.setObjectName(name)
         b.setCursor(Qt.PointingHandCursor)
         b.setCheckable(checkable)
         b.clicked.connect(cb)
         return b
 
-    def volume_row(self, vol, glyph, glyph_off, extra):
+    def volume_row(self, flow, glyph, glyph_off, extra):
         row = QHBoxLayout()
         row.setSpacing(8)
         mute = self.icon_button(glyph, lambda: None, checkable=True)
         slider = QSlider(Qt.Horizontal)
         slider.setObjectName("vol")
         slider.setRange(0, 100)
-        try:
-            slider.setValue(round(vol.GetMasterVolumeLevelScalar() * 100))
-            mute.setChecked(bool(vol.GetMute()))
-        except Exception:
-            pass
-        mute.setText(glyph_off if mute.isChecked() else glyph)
+        ctl = dict(flow=flow, vol=audio.default_volume(flow), slider=slider, mute=mute, glyphs=(glyph, glyph_off),
+                   quiet=False)
 
         def apply():
+            if ctl["quiet"]:
+                return
             try:
-                vol.SetMasterVolumeLevelScalar(slider.value() / 100, None)
-                vol.SetMute(int(mute.isChecked()), None)
+                ctl["vol"].SetMasterVolumeLevelScalar(slider.value() / 100, None)
+                ctl["vol"].SetMute(int(mute.isChecked()), None)
             except Exception:
                 pass
             mute.setText(glyph_off if mute.isChecked() else glyph)
             self.bar.refresh()
         slider.valueChanged.connect(apply)
         mute.toggled.connect(apply)
+        self.load_volume(ctl, animated=False)
         row.addWidget(mute)
         row.addWidget(slider, 1)
         row.addWidget(extra)
+        self.volumes.append(ctl)
         return row
+
+    def load_volume(self, ctl, animated=True):
+        """Ползунок — к громкости основного устройства (после смены устройства — плавно)."""
+        try:
+            level = round(ctl["vol"].GetMasterVolumeLevelScalar() * 100)
+            muted = bool(ctl["vol"].GetMute())
+        except Exception:
+            return
+        ctl["quiet"] = True
+        ctl["mute"].setChecked(muted)
+        ctl["mute"].setText(ctl["glyphs"][1] if muted else ctl["glyphs"][0])
+        slider, start = ctl["slider"], ctl["slider"].value()
+        if not animated or start == level:
+            slider.setValue(level)
+            ctl["quiet"] = False
+            return
+
+        def step(v):
+            slider.setValue(round(start + (level - start) * v))
+
+        def done():
+            ctl["quiet"] = False
+        ctl["anim"] = animate(self, 300, step, done)
 
     def device_rows(self, flow):
         box = QVBoxLayout()
         box.setSpacing(4)
         for d in audio.devices(flow):
             row = QHBoxLayout()
-            row.setSpacing(0)
-            for glyph, comm, side in ((GLYPH_MUSIC, False, "segL"), (GLYPH_PHONE, True, "segR")):
-                b = QPushButton(glyph)
-                b.setObjectName("seg")
-                b.setCheckable(True)
-                b.setChecked(d["comm"] if comm else d["media"])
-                b.setToolTip("Для звонков" if comm else "Для музыки и игр")
-                b.setCursor(Qt.PointingHandCursor)
-                radius = "border-top-left-radius: 7px; border-bottom-left-radius: 7px;" if side == "segL" else \
-                    "border-top-right-radius: 7px; border-bottom-right-radius: 7px; border-left: none;"
-                b.setStyleSheet(radius)
-                b.clicked.connect(lambda _=False, did=d["id"], c=comm: self.pick_device(did, c))
-                row.addWidget(b)
-            row.addSpacing(10)
+            row.setSpacing(10)
+            seg = SegPair(d["media"], d["comm"])
+            seg.setToolTip("♫ — для музыки и игр, ☎ — для звонков")
+            seg.clicked.connect(lambda comm, did=d["id"]: self.pick_device(did, comm))
             name = QLabel()
             name.setObjectName("dev")
             name.setText(QFontMetricsF(QFont("Segoe UI", 9)).elidedText(d["name"], Qt.ElideRight, self.WIDTH - 110))
             name.setToolTip(d["name"])
+            row.addWidget(seg)
             row.addWidget(name, 1)
             box.addLayout(row)
+            self.segs.append((flow, d["id"], seg))
         return box
 
     def pick_device(self, device_id, comm):
-        audio.set_default(device_id, comm)
-        QTimer.singleShot(150, self.rebuild)
+        if not audio.set_default(device_id, comm):
+            return
+        # отмечаем выбор сразу (плавно), не пересобирая окно; затем сверяемся с системой
+        flow = next((f for f, d, _ in self.segs if d == device_id), None)
+        for f, did, seg in self.segs:
+            if f != flow:
+                continue
+            if comm:
+                seg.set_state(seg.state[0], did == device_id)
+            else:
+                seg.set_state(did == device_id, seg.state[1])
+        QTimer.singleShot(250, self.sync_devices)
 
-    def apps_box(self):
-        box = QVBoxLayout()
-        box.setSpacing(6)
-        for a in audio.app_sessions():
+    def sync_devices(self):
+        states = {d["id"]: d for flow in (audio.OUTPUT, audio.INPUT) for d in audio.devices(flow)}
+        for _, did, seg in self.segs:
+            d = states.get(did)
+            if d is not None:
+                seg.set_state(d["media"], d["comm"])
+        for ctl in self.volumes:  # основное устройство сменилось — ползунок к его громкости
+            ctl["vol"] = audio.default_volume(ctl["flow"])
+            self.load_volume(ctl)
+
+    def fill_apps(self):
+        box = self.apps.box
+        while box.count():
+            item = box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    w = item.layout().takeAt(0).widget()
+                    if w:
+                        w.deleteLater()
+        sessions = audio.app_sessions()
+        self.apps_filled = True
+        self.app_sliders = []
+        if not sessions:
+            box.addWidget(self.label("Сейчас ни одна программа не воспроизводит звук", "dim"))
+        for a in sessions:
             row = QHBoxLayout()
             row.setSpacing(8)
             icon = QLabel()
@@ -568,85 +768,125 @@ class VolumeFlyout(Flyout):
                     except Exception:
                         pass
             s.valueChanged.connect(set_vol)
+            self.app_sliders.append((s, a["volumes"]))
             row.addWidget(icon)
             row.addWidget(name)
             row.addWidget(s, 1)
             box.addLayout(row)
-        if not box.count():
-            box.addWidget(self.label("Сейчас ни одна программа не воспроизводит звук", "dim"))
-        return box
 
-    def toggle_apps(self):
-        self.apps_open = not self.apps_open
-        self.rebuild()
+    def toggle_apps(self, on):
+        if on:
+            if not self.apps_filled:
+                self.fill_apps()
+            else:
+                self.refresh_app_levels()  # список уже готов — только свежие уровни громкости
+        self.apps.toggle(on)
+
+    def prefill_apps(self):
+        """Список программ и их значки готовим сразу после открытия окна — раскрытие потом мгновенное."""
+        if self.isVisible() and not self.apps_filled and hasattr(self, "apps"):
+            self.fill_apps()
+
+    def refresh_app_levels(self):
+        for slider, vols in self.app_sliders:
+            try:
+                slider.blockSignals(True)
+                slider.setValue(round(vols[0].GetMasterVolume() * 100))
+            except Exception:
+                pass
+            finally:
+                slider.blockSignals(False)
 
     def build(self):
         self.lay.setSpacing(8)
+        self.volumes, self.segs, self.cards = [], [], {}
+        self.apps_filled, self.app_sliders = False, []
         if not audio.available():
             self.lay.addWidget(self.label("Не удалось подключиться к звуковым устройствам", "dim"))
             self.lay.addWidget(self.button("Параметры звука…", lambda: os.startfile("ms-settings:sound")))
             return
         self.lay.addWidget(self.section("Общая громкость"))
-        out = audio.default_volume(audio.OUTPUT)
-        mic = audio.default_volume(audio.INPUT)
-        mixer = self.icon_button(GLYPH_MIXER, self.toggle_apps, checkable=True)
-        mixer.setObjectName("mix")  # включённая — подсвечена (у кнопок звука «нажато» значит «выключено»)
-        mixer.setChecked(self.apps_open)
+        mixer = self.icon_button(GLYPH_MIXER, lambda: None, checkable=True, name="mix")
         mixer.setToolTip("Громкость программ")
-        if out is not None:
-            self.lay.addLayout(self.volume_row(out, GLYPH_SPEAKER, GLYPH_MUTE, mixer))
-        if self.apps_open:
-            self.lay.addLayout(self.apps_box())
-        if mic is not None:
-            settings = self.icon_button(GLYPH_SETTINGS, lambda: (self.close(), os.startfile("ms-settings:sound")))
-            settings.setToolTip("Параметры звука")
-            self.lay.addLayout(self.volume_row(mic, GLYPH_MIC, GLYPH_MIC_OFF, settings))
+        mixer.toggled.connect(self.toggle_apps)
+        self.mixer_button = mixer
+        self.lay.addLayout(self.volume_row(audio.OUTPUT, GLYPH_SPEAKER, GLYPH_MUTE, mixer))
+        self.apps = Collapsible(self.refit)
+        self.lay.addWidget(self.apps)
+        settings = self.icon_button(GLYPH_SETTINGS, lambda: (self.close(), os.startfile("ms-settings:sound")))
+        settings.setToolTip("Параметры звука")
+        self.lay.addLayout(self.volume_row(audio.INPUT, GLYPH_MIC, GLYPH_MIC_OFF, settings))
         self.lay.addWidget(self.line())
         self.lay.addWidget(self.section("Устройство вывода"))
         self.lay.addLayout(self.device_rows(audio.OUTPUT))
         self.lay.addWidget(self.line())
         self.lay.addWidget(self.section("Устройство ввода"))
         self.lay.addLayout(self.device_rows(audio.INPUT))
+        self.media_head = QWidget()
+        hl = QVBoxLayout(self.media_head)
+        hl.setContentsMargins(0, 0, 0, 0)
+        hl.setSpacing(8)
+        hl.addWidget(self.line())
+        hl.addWidget(self.section("Медиаплееры"))
+        self.media_head.setVisible(False)
+        self.lay.addWidget(self.media_head)
         self.media_box = QVBoxLayout()
         self.media_box.setSpacing(8)
         self.lay.addLayout(self.media_box)
-        self.fill_media()
+        for s in getattr(self, "sessions", []):  # последние известные плееры — сразу, без анимации
+            self.add_card(s, animated=False)
 
-    def rebuild(self):
-        self.clear()
-        self.build()
-        self.refit()
+    # -- плееры: обновляются на месте
+    @staticmethod
+    def card_key(s):
+        return (s["app"], s["id"])
 
-    # -- плееры
+    def add_card(self, s, animated=True):
+        card = MediaCard(s, self.watcher)
+        self.cards[self.card_key(s)] = card
+        self.media_box.addWidget(card)
+        self.media_head.setVisible(True)
+        if animated:
+            card.show_animated(self.refit)
+        else:
+            card.appear = 1.0
+            card.setFixedHeight(card.H)
+
     def on_media(self, sessions):
-        state = [(s["app"], s["title"], s["artist"], s["playing"], bool(s["cover"])) for s in sessions]
-        if state == self.media_state:
-            return
-        self.media_state = state
         self.sessions = sessions
-        if self.isVisible():
-            self.fill_media()
-            self.refit()
-
-    def fill_media(self):
-        if self.media_box is None:
+        if not self.isVisible() or not hasattr(self, "media_box"):
             return
-        while self.media_box.count():
-            item = self.media_box.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        sessions = getattr(self, "sessions", [])
-        if not sessions:
-            return
-        self.media_box.addWidget(self.line())
-        self.media_box.addWidget(self.section("Медиаплееры"))
+        alive = set()
         for s in sessions:
-            self.media_box.addWidget(MediaCard(s, self.watcher))
+            key = self.card_key(s)
+            alive.add(key)
+            card = self.cards.get(key)
+            if card is None:
+                self.add_card(s)
+            else:
+                card.set_info(s)
+        for key in [k for k in self.cards if k not in alive]:
+            card = self.cards.pop(key)
+
+            def gone(c=card):
+                self.media_box.removeWidget(c)
+                c.deleteLater()
+                self.media_head.setVisible(bool(self.cards))
+                self.refit()
+            card.hide_animated(self.refit, gone)
+
+    def resizeEvent(self, e):
+        if self.isVisible():
+            if self.glass.live_on:
+                self.glass.start_live()  # живой фон сам догонит новый размер окна
+            else:
+                self.glass.refresh()
 
     def showEvent(self, e):
         super().showEvent(e)
         self.watcher.refresh()
         self.media_timer.start()
+        QTimer.singleShot(250, self.prefill_apps)
 
     def hideEvent(self, e):
         self.media_timer.stop()

@@ -388,13 +388,20 @@ def foreground_is_fullscreen():
         info = win32api.GetMonitorInfo(win32api.MonitorFromWindow(fg))
         if not info["Flags"] & 1:  # MONITORINFOF_PRIMARY: док и панель живут на основном мониторе
             return False
-        if user32.IsZoomed(fg):  # обычное развёрнутое окно — не игра (а браузер в F11 не «развёрнут» — он на весь экран)
-            return False
         rect = win32gui.GetWindowRect(fg)
+        zoomed = user32.IsZoomed(fg)
     except Exception:
         return False
-    mon = info["Monitor"]
-    return rect[0] <= mon[0] and rect[1] <= mon[1] and rect[2] >= mon[2] and rect[3] >= mon[3]
+    return _is_fullscreen_rect(rect, info["Monitor"], zoomed)
+
+
+def _is_fullscreen_rect(rect, mon, zoomed):
+    """Окно на весь монитор. Браузер в F11 (и видео на весь экран) остаётся «развёрнутым», но совпадает
+    с монитором до пикселя; обычное развёрнутое окно вылезает за края на невидимую рамку (8 px) и не
+    заходит под верхнюю панель — его не считаем."""
+    exact = all(abs(a - b) <= 2 for a, b in zip(rect, mon))
+    covers = rect[0] <= mon[0] and rect[1] <= mon[1] and rect[2] >= mon[2] and rect[3] >= mon[3]
+    return exact or (covers and not zoomed)
 
 
 def window_monitor(hwnd):
@@ -416,16 +423,13 @@ def fullscreen_monitor():
     if pid == os.getpid():
         return None
     try:
-        if user32.IsZoomed(fg):
-            return None
         mon = win32api.MonitorFromWindow(fg)
         m = win32api.GetMonitorInfo(mon)["Monitor"]
         rect = win32gui.GetWindowRect(fg)
+        zoomed = user32.IsZoomed(fg)
     except Exception:
         return None
-    if rect[0] <= m[0] and rect[1] <= m[1] and rect[2] >= m[2] and rect[3] >= m[3]:
-        return int(mon)
-    return None
+    return int(mon) if _is_fullscreen_rect(rect, m, zoomed) else None
 
 
 def primary_monitor_rect():

@@ -298,7 +298,11 @@ class App:
         elif flag == "--test-volume":  # открыть окно звука (для проверки)
             from PySide6.QtCore import QRectF as _R
             from .flyouts import VolumeFlyout
-            self.bar.toggle_flyout(VolumeFlyout, "vol", _R(self.bar.width() - 420, 0, 30, self.bar.H))
+            fly = self.bar.flyouts.get(VolumeFlyout)
+            if fly is not None and fly.isVisible():  # уже открыто — нажать «громкость программ»
+                fly.mixer_button.toggle()
+            else:
+                self.bar.toggle_flyout(VolumeFlyout, "vol", _R(self.bar.width() - 420, 0, 30, self.bar.H))
         elif flag == "--show":
             # MiniDock запустили ещё раз: показать док и панель (даже если считали, что идёт игра) и ответить
             self.fullscreen = False

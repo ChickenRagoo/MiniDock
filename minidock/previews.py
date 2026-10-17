@@ -120,10 +120,12 @@ class CornerMask(QWidget):
         self.bg = None
         self.rects = []
         self.overlay = None
+        self.radius = THUMB_RADIUS
 
-    def sync(self, panel, rects, overlay=None):
+    def sync(self, panel, rects, overlay=None, radius=None):
         """rects — QRectF миниатюр в координатах панели; overlay(painter) — что дорисовать поверх (крестик)."""
         self.rects, self.overlay = rects, overlay
+        self.radius = THUMB_RADIUS if radius is None else radius
         self.bg = panel.grab()  # тот же фон, подсветка и тонировка, что под миниатюрами
         if self.geometry() != panel.geometry():
             self.setGeometry(panel.geometry())
@@ -143,11 +145,11 @@ class CornerMask(QWidget):
             square = QPainterPath()
             square.addRect(r)
             round_ = QPainterPath()
-            round_.addRoundedRect(r, THUMB_RADIUS, THUMB_RADIUS)
+            round_.addRoundedRect(r, self.radius, self.radius)
             p.fillPath(square.subtracted(round_), brush)
             p.setPen(QPen(QColor(255, 255, 255, 42), 1))
             p.setBrush(Qt.NoBrush)
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), THUMB_RADIUS, THUMB_RADIUS)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self.radius, self.radius)
         if self.overlay:
             self.overlay(p)
 
@@ -159,8 +161,8 @@ class LiveThumbs:
         self.host = ThumbHost()
         self.mask = CornerMask()
 
-    def show(self, panel, tiles, overlay=None):
-        """tiles — [(hwnd, QRectF в координатах панели)]."""
+    def show(self, panel, tiles, overlay=None, radius=None):
+        """tiles — [(hwnd, QRectF в координатах панели)]; radius — скругление миниатюр."""
         dpr = panel.devicePixelRatioF()
         g = panel.geometry()
         rect = (round(g.x() * dpr), round(g.y() * dpr), round((g.x() + g.width()) * dpr),
@@ -168,12 +170,12 @@ class LiveThumbs:
         boxes = [(h, (round(t.x() * dpr), round(t.y() * dpr), round(t.right() * dpr), round(t.bottom() * dpr)))
                  for h, t in tiles]
         self.host.show(rect, boxes)
-        self.mask.sync(panel, [t for _, t in tiles], overlay)
+        self.mask.sync(panel, [t for _, t in tiles], overlay, radius)
 
-    def refresh_mask(self, panel, tiles, overlay=None):
+    def refresh_mask(self, panel, tiles, overlay=None, radius=None):
         """Под миниатюрами что-то поменялось (подсветка) — перерисовать уголки."""
         if self.mask.isVisible():
-            self.mask.sync(panel, [t for _, t in tiles], overlay)
+            self.mask.sync(panel, [t for _, t in tiles], overlay, radius)
 
     def fade_in(self, owner, ms=170):
         self.host.opacity = 0
@@ -193,10 +195,17 @@ class WindowPreview(QWidget):
     """Предпросмотр окон приложения при наведении на иконку в доке."""
     GAP, TITLE_H = 16.0, 22.0
 
+    RADIUS = 16.0  # скругление самого окна предпросмотра
+
     @property
     def PAD(self):
         """Прозрачный ободок вокруг миниатюр (настройка «Толщина рамки»)."""
         return float(self.cfg["dock_preview_pad"])
+
+    @property
+    def thumb_radius(self):
+        """Углы картинки идут параллельно углам окна: скругление окна минус толщина рамки."""
+        return max(4.0, self.RADIUS - self.PAD)
 
     def __init__(self, app):
         super().__init__(None, TOP_FLAGS)
@@ -295,7 +304,7 @@ class WindowPreview(QWidget):
         prepare_glass(self.glass)
         self.show()
         self.raise_()
-        self.thumbs.show(self, self.tiles, self.paint_overlay)
+        self.thumbs.show(self, self.tiles, self.paint_overlay, self.thumb_radius)
         self.thumbs.fade_in(self)
 
     def close_preview(self):
@@ -316,7 +325,7 @@ class WindowPreview(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        path = rounded_path(self.rect(), 16)
+        path = rounded_path(self.rect(), self.RADIUS)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(30, 30, 36, 165))
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
@@ -325,7 +334,7 @@ class WindowPreview(QWidget):
             if self.hover is not None and self.hover[0] == i:
                 # подсветка вокруг миниатюры (её уголки слой скругления повторит)
                 hp = QPainterPath()
-                hp.addRoundedRect(thumb.adjusted(-5, -5, 5, 5), THUMB_RADIUS + 4, THUMB_RADIUS + 4)
+                hp.addRoundedRect(thumb.adjusted(-5, -5, 5, 5), self.thumb_radius + 4, self.thumb_radius + 4)
                 p.fillPath(hp, QColor(255, 255, 255, 40))
 
     def paint_overlay(self, p):
@@ -345,7 +354,7 @@ class WindowPreview(QWidget):
         if hover != self.hover:
             self.hover = hover
             self.update()
-            self.thumbs.refresh_mask(self, self.tiles, self.paint_overlay)
+            self.thumbs.refresh_mask(self, self.tiles, self.paint_overlay, self.thumb_radius)
 
     # -- mouse
     def hit(self, pos):
@@ -396,4 +405,4 @@ class WindowPreview(QWidget):
         self.setGeometry(self.x(), self.y(), int(w), int(h))
         self.hover = None
         self.update()
-        self.thumbs.show(self, self.tiles, self.paint_overlay)
+        self.thumbs.show(self, self.tiles, self.paint_overlay, self.thumb_radius)

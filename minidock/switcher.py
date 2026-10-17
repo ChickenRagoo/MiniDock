@@ -784,6 +784,7 @@ class WinSwitcher(QWidget):
     def paintEvent(self, _):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)  # фон — уменьшенный снимок: без сглаживания он в «квадратики»
         path = rounded_path(self.rect(), float(self.cfg["switcher_radius"]))
         self.glass.fill(p, path)
         p.fillPath(path, QColor(30, 30, 36, int(self.cfg["switcher_opacity"])))

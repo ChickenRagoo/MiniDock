@@ -419,6 +419,8 @@ class Launchpad(QWidget):
         self.activateWindow()
         enable_blur(int(self.winId()))
         self.capture_keys = True
+        for d in self.app.docks():  # док уезжает, пока открыт Launchpad
+            d.wake()
         for ms in (10, 60, 150, 300, 600, 1000):  # Windows может не отдать фокус с первого раза
             QTimer.singleShot(ms, self.ensure_focus)
         self.search.setFocus()
@@ -436,6 +438,8 @@ class Launchpad(QWidget):
         def done():
             self.hide()
             self.closing = False
+            for d in self.app.docks():  # Launchpad закрыт — док снова доступен
+                d.wake()
             if then:
                 then()
         self._fade = animate(self, 140, lambda v: self.setWindowOpacity(start * (1 - v)), done)

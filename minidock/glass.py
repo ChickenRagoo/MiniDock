@@ -12,7 +12,7 @@ import threading
 
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QTimer, Signal
-from PySide6.QtGui import QBrush, QImage, QPixmap, QTransform
+from PySide6.QtGui import QBrush, QImage, QPainter, QPixmap, QTransform
 
 import win32gui
 
@@ -186,5 +186,7 @@ class Glass(QObject):
             return False
         brush = QBrush(self.pix)
         brush.setTransform(self.transform)
+        # фон — уменьшенный в 4 раза снимок: растягиваем со сглаживанием, иначе он в «квадратики»
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
         painter.fillPath(path, brush)
         return True

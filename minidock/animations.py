@@ -378,8 +378,9 @@ class WindowAnimator:
         if self.busy(hwnd):
             return False
         dpr = QApplication.primaryScreen().devicePixelRatio()
+        dock = int(self.dock_for(hwnd).winId())
         if img is not None and self.gpu_for(icon).play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode,
-                                                       on_done, dpr):
+                                                       on_done, dpr, below=dock):
             return True
         if DEBUG:
             print(f"fallback to DWM: img={'none' if img is None else img.size()} reverse={reverse}", flush=True)

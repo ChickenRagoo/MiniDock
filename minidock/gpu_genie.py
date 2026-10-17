@@ -6,6 +6,9 @@
 import ctypes
 import time
 
+import win32con
+import win32gui
+
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QSurfaceFormat
 from PySide6.QtQuick import (QQuickItem, QQuickWindow, QSGGeometry, QSGGeometryNode, QSGNode, QSGOpacityNode,
@@ -194,7 +197,8 @@ class GpuGenie:
     def busy_with(self, hwnd):
         return any(a["hwnd"] == hwnd for a in self.anims)
 
-    def play(self, hwnd, img, src, dst, reverse, duration, flow="down", mode="genie", on_done=None, dpr=1.0):
+    def play(self, hwnd, img, src, dst, reverse, duration, flow="down", mode="genie", on_done=None, dpr=1.0,
+             below=None):
         """img — QImage окна; src/dst — (l, t, r, b) в физических пикселях экрана."""
         if self.busy_with(hwnd) or len(self.anims) >= SLOTS or img is None or img.isNull():
             return False
@@ -203,7 +207,12 @@ class GpuGenie:
         self._set_image(a, img, src, dst)
         if not self.win.isVisible():
             self.win.show()
-        self.win.raise_()
+        if below:
+            # сразу под окном дока: окно «втекает» ПОД иконку, но остаётся над остальными программами
+            win32gui.SetWindowPos(self.hwnd, below, 0, 0, 0, 0,
+                                  win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+        else:
+            self.win.raise_()
         self.anims.append(a)
         self.item.update()
         self.timer.start()
