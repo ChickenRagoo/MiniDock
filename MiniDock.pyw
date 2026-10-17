@@ -16,6 +16,12 @@ sys.setswitchinterval(0.002)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+if "--live-helper" in sys.argv:
+    # процесс-помощник живого фона «стекла»: лупа Windows отдельно от основного процесса (см. livecapture.py)
+    from minidock.livecapture import helper_main
+    helper_main(int(sys.argv[sys.argv.index("--live-helper") + 1]))
+    sys.exit(0)
+
 if getattr(sys, "frozen", False) and "--" not in " ".join(sys.argv[1:]):
     # у собранного MiniDock.exe нет консоли — ошибки пишем в файл, чтобы их можно было прислать
     _log_dir = os.path.join(os.environ.get("APPDATA", "."), "MiniDock")

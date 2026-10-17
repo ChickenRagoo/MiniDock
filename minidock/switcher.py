@@ -601,3 +601,239 @@ class Switcher(QWidget):
             return
         self.app.keys.switching = False
         self.commit(hwnd)
+
+
+class WinSwitcher(QWidget):
+    """Второй стиль Alt+Tab — как в Windows: крупные живые миниатюры всех окон (по последнему использованию),
+    у каждой внизу значок программы, под ней — заголовок окна. Tab/стрелки — по окнам, Q — закрыть окно."""
+    GAP = 22.0       # между миниатюрами
+    LABEL = 40.0     # под миниатюрой: половина значка + заголовок
+    ICON = 34.0
+
+    def __init__(self, app, base):
+        super().__init__(None, TOP_FLAGS)
+        self.app = app
+        self.base = base          # обычный переключатель — у него берём список окон и значки
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.setMouseTracking(True)
+        self.wins = []            # [(hwnd, приложение)] в порядке последнего использования
+        self.layout_rows = []     # [(индексы окон, ширины, высота)]
+        self.index = 0
+        self.hover = None
+        self.active = False
+        self.pad = 16.0
+        self.font_title = QFont("Segoe UI", 9)
+        self.glass = make_glass(self)
+        self.thumbs = LiveThumbs()
+
+    @property
+    def cfg(self):
+        return self.app.cfg
+
+    # -- данные и раскладка
+    def collect(self):
+        apps = self.base.collect()
+        mru = {h: i for i, h in enumerate(self.app.mru)}
+        wins = [(h, a) for a in apps for h in a["hwnds"]]
+        order = {h: i for i, (h, _) in enumerate(wins)}
+        wins.sort(key=lambda x: mru.get(x[0], len(mru) + order[x[0]]))
+        return wins
+
+    def tile_height(self):
+        return float(self.cfg["switcher_preview"]) * 0.5625 * 1.15
+
+    def place(self):
+        """Окна раскладываются рядами (до 4), каждый ряд — не шире экрана."""
+        scr = QApplication.primaryScreen().geometry()
+        max_w = scr.width() - 200
+        hwnds = [h for h, _ in self.wins]
+        self.pad = max(16.0, float(self.cfg["switcher_radius"]))
+        layout = []
+        for rows in range(1, 5):
+            per = -(-len(hwnds) // rows)
+            chunks = [list(range(i, min(i + per, len(hwnds)))) for i in range(0, len(hwnds), per)]
+            layout = [(idx, *row_layout([hwnds[i] for i in idx], self.tile_height(), self.GAP, max_w))
+                      for idx in chunks]
+            if all(h >= self.tile_height() - 0.5 for _, _, h in layout):
+                break
+        self.layout_rows = layout
+        w = max(sum(ws) + self.GAP * (len(ws) - 1) for _, ws, _ in layout) + self.pad * 2
+        h = self.pad * 2 + sum(rh + self.LABEL for _, _, rh in layout) + self.GAP * 0.5 * (len(layout) - 1)
+        y = scr.center().y() - h / 2 if self.cfg["switcher_position"] == "center" else scr.top() + scr.height() * 0.22
+        self.setGeometry(int(scr.center().x() - w / 2), int(y), int(w), int(h))
+
+    def tiles(self):
+        out = []
+        y = self.pad
+        for idx, widths, rh in self.layout_rows:
+            total = sum(widths) + self.GAP * (len(widths) - 1)
+            x = (self.width() - total) / 2
+            for i, w in zip(idx, widths):
+                out.append((self.wins[i][0], QRectF(round(x), round(y), round(w), round(rh))))
+                x += w + self.GAP
+            y += rh + self.LABEL + self.GAP * 0.5
+        return out
+
+    def row_of(self, i):
+        for r, (idx, _, _) in enumerate(self.layout_rows):
+            if i in idx:
+                return r, idx.index(i)
+        return 0, 0
+
+    # -- управление (из хука клавиатуры)
+    def begin(self, direction):
+        self.wins = self.collect()
+        if not self.wins:
+            return
+        self.app.preview.close_preview()
+        self.index = (1 if direction > 0 else -1) % len(self.wins) if len(self.wins) > 1 else 0
+        self.hover = None
+        self.active = True
+        QTimer.singleShot(int(self.cfg["switcher_delay"]), self.show_if_active)
+
+    def show_if_active(self):
+        if not self.active:
+            return
+        self.place()
+        self.show()
+        self.raise_()
+        self.thumbs.show(self, self.tiles(), self.paint_overlay)
+        self.thumbs.fade_in(self)
+
+    def changed(self):
+        self.update()
+        if self.isVisible():
+            self.thumbs.refresh_mask(self, self.tiles(), self.paint_overlay)
+
+    def step(self, d):
+        if self.active and self.wins:
+            self.index = (self.index + d) % len(self.wins)
+            self.changed()
+
+    def arrow(self, vk):
+        if not self.active or not self.wins:
+            return
+        if vk in (0x25, 0x27):  # стрелки влево/вправо
+            self.step(1 if vk == 0x27 else -1)
+            return
+        r, c = self.row_of(self.index)
+        r2 = r + (1 if vk == 0x28 else -1)
+        if 0 <= r2 < len(self.layout_rows):
+            idx = self.layout_rows[r2][0]
+            self.index = idx[min(c, len(idx) - 1)]
+            self.changed()
+
+    def next_window(self):
+        """Клавиша Ё — следующее окно той же программы."""
+        if not self.active or not self.wins:
+            return
+        exe = self.wins[self.index][1]["exe"]
+        n = len(self.wins)
+        for k in range(1, n):
+            j = (self.index + k) % n
+            if self.wins[j][1]["exe"] == exe:
+                self.index = j
+                self.changed()
+                return
+
+    def finish(self):
+        self.active = False
+        self.thumbs.hide()
+        self.hide()
+
+    def cancel(self):
+        self.finish()
+
+    def commit(self, hwnd=None):
+        if not self.active or not self.wins:
+            self.finish()
+            return
+        if hwnd is None:
+            hwnd = self.wins[self.index][0]
+        target = next(a for h, a in self.wins if h == hwnd)
+        self.finish()
+        if win32gui.IsIconic(hwnd) and self.cfg["switcher_genie"]:
+            dock = self.app.animator.dock_for(hwnd)
+            icon = dock.icon_screen_rect(dock.item_for_hwnd(hwnd, target["exe"]))
+            dock.reveal(0.8)
+            self.app.animator.restore(hwnd, icon)
+        else:
+            force_foreground(hwnd)
+
+    def quit_selected(self):
+        """Q: закрыть выбранное окно."""
+        if not self.active or not self.wins:
+            return
+        hwnd, _ = self.wins.pop(self.index)
+        syscommand(hwnd, win32con.SC_CLOSE)
+        if not self.wins:
+            self.finish()
+            return
+        self.index %= len(self.wins)
+        self.thumbs.hide()
+        self.place()
+        self.thumbs.show(self, self.tiles(), self.paint_overlay)
+        self.update()
+
+    # -- рисование
+    def showEvent(self, e):
+        prepare_glass(self.glass)
+        fade_in(self)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        path = rounded_path(self.rect(), float(self.cfg["switcher_radius"]))
+        self.glass.fill(p, path)
+        p.fillPath(path, QColor(30, 30, 36, int(self.cfg["switcher_opacity"])))
+        p.setPen(QPen(QColor(255, 255, 255, 45), 1))
+        p.drawPath(path)
+        fm = QFontMetricsF(self.font_title)
+        p.setFont(self.font_title)
+        for i, (h, tile) in enumerate(self.tiles()):
+            sel = i == self.index
+            if sel or i == self.hover:
+                box = QPainterPath()
+                box.addRoundedRect(tile.adjusted(-7, -7, 7, self.LABEL - 4), THUMB_RADIUS + 6, THUMB_RADIUS + 6)
+                p.fillPath(box, QColor(10, 132, 255, 70) if sel else QColor(255, 255, 255, 26))
+                if sel:
+                    p.setPen(QPen(QColor(10, 132, 255), 2))
+                    p.setBrush(Qt.NoBrush)
+                    p.drawPath(box)
+            title = QRectF(tile.left(), tile.bottom() + self.ICON / 2 + 2, tile.width(), fm.height() + 2)
+            p.setPen(QColor(255, 255, 255, 240 if sel else 160))
+            p.drawText(title, Qt.AlignHCenter | Qt.AlignTop,
+                       fm.elidedText(window_title(h), Qt.ElideRight, title.width()))
+
+    def paint_overlay(self, p):
+        """Поверх миниатюр (в слое скругления): значок программы по центру нижнего края каждой миниатюры."""
+        dpr = self.devicePixelRatioF()
+        apps = {h: a for h, a in self.wins}
+        for h, tile in self.tiles():
+            it = apps.get(h, {}).get("item")
+            if it is None or not it.pix:
+                continue
+            r = QRectF(tile.center().x() - self.ICON / 2, tile.bottom() - self.ICON / 2, self.ICON, self.ICON)
+            pix = it.pix_for(self.ICON * dpr)
+            p.drawPixmap(r, pix, QRectF(pix.rect()))
+
+    # -- мышь: наведение подсвечивает, клик — переключает
+    def tile_at(self, pos):
+        for i, (h, tile) in enumerate(self.tiles()):
+            if tile.adjusted(-7, -7, 7, self.LABEL).contains(pos):
+                return i
+        return None
+
+    def mouseMoveEvent(self, e):
+        i = self.tile_at(e.position())
+        if i != self.hover:
+            self.hover = i
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        i = self.tile_at(e.position())
+        if e.button() != Qt.LeftButton or i is None:
+            return
+        self.app.keys.switching = False
+        self.commit(self.wins[i][0])

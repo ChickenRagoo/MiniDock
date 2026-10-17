@@ -10,6 +10,9 @@ a = Analysis(
     hiddenimports=[
         "win32com.shell.shell", "win32com.shell.shellcon", "pythoncom", "pywintypes",
         "pycaw.pycaw", "comtypes", "comtypes.stream", "numpy",
+        # карточки плееров в окне звука (системное API медиа Windows)
+        "winrt.runtime", "winrt.windows.foundation", "winrt.windows.foundation.collections",
+        "winrt.windows.media.control", "winrt.windows.storage.streams",
     ],
     excludes=[
         # не используются — меньше размер установщика

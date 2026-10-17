@@ -430,7 +430,12 @@ class Dock(QWidget):
             if now - self.last_seen > float(self.cfg["autohide_delay"]):
                 target_hide = 1.0
         changed = False
-        if target_hide == 0.0 and self.hide_k >= 0.99 and self.glass.enabled:
+        if self.glass.enabled and self.hide_k < 0.99 and self.isVisible():
+            if not self.glass.live_on and self.glass.start_live():
+                pass  # живой фон: обновляется сам, пока док на экране
+        elif self.glass.live_on:
+            self.glass.stop_live()  # док спрятан — фон под ним снимать незачем
+        if target_hide == 0.0 and self.hide_k >= 0.99 and self.glass.enabled and not self.glass.live_on:
             self.glass.refresh()  # док начинает выезжать — свежий фон, пока его ещё нет на экране
         if self.hide_k != target_hide:
             self.hide_k += (target_hide - self.hide_k) * smooth(0.2, self.anim.dt)
@@ -537,13 +542,18 @@ class Dock(QWidget):
 
     def apply_glass(self):
         # без автоскрытия док не уходит с экрана и фон под ним не переснять — тогда только тонировка
-        self.glass.enabled = GLASS["enabled"] and bool(self.cfg["dock_blur"]) and bool(self.cfg["autohide"])
+        # снимок фона возможен только пока дока нет на экране (значит, нужно автоскрытие); живой фон — всегда
+        live = GLASS.get("live", True)
+        self.glass.enabled = GLASS["enabled"] and bool(self.cfg["dock_blur"]) and (bool(self.cfg["autohide"]) or live)
+        if not self.glass.enabled or not live:
+            self.glass.stop_live()
         if not self.glass.enabled:
             self.glass.pix = None
             self.update()
 
     def hideEvent(self, e):
         self.glass.stop()
+        self.glass.stop_live()
 
     def showEvent(self, e):
         self.apply_glass()

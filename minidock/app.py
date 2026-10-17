@@ -20,8 +20,9 @@ from .launchpad import Launchpad
 from .menubar import MenuBar
 from .previews import WindowPreview
 from .spotlight import Spotlight
-from .switcher import KeyHook, Switcher
+from .switcher import KeyHook, Switcher, WinSwitcher
 from .elevation import open_security
+from .ui import GLASS
 from .updater import Updater
 from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
@@ -35,7 +36,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-spotlight": "MiniDock_TestSpotlight", "--test-lp-start": "MiniDock_TestLpStart",
             "--reveal": "MiniDock_Reveal", "--test-preview": "MiniDock_TestPreview",
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
-            "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show"}
+            "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
+            "--test-volume": "MiniDock_TestVolume"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -61,7 +63,8 @@ class App:
         self.extra_docks = {}  # имя монитора -> док на дополнительном мониторе
         self.launchpad = Launchpad(self)
         self.spotlight = Spotlight(self)
-        self.switcher = Switcher(self)
+        self.mac_switcher = Switcher(self)
+        self.win_switcher = WinSwitcher(self, self.mac_switcher)
         self.keys = KeyHook(self)
         self.updater = Updater(self)
 
@@ -133,6 +136,8 @@ class App:
     # -- layout of dock / bar / taskbar / work area
     def apply_layout(self):
         cfg = self.cfg
+        GLASS["live"] = bool(cfg["glass_live"])
+        GLASS["radius"] = float(cfg["glass_radius"])
         if cfg["replace_taskbar"]:
             self.taskbar.hide()
         elif self.taskbar.hidden or cfg.get("taskbar_orig_state") is not None:
@@ -151,6 +156,11 @@ class App:
         self.apply_shadows()
         self.update_work_area()
         self.launchpad.update()
+
+    @property
+    def switcher(self):
+        """Alt+Tab выбранного стиля: «как в macOS» (значки + окна) или «как в Windows» (миниатюры окон)."""
+        return self.win_switcher if self.cfg["switcher_style"] == "windows" else self.mac_switcher
 
     def bars(self):
         return [self.bar] + list(self.extra_bars.values())
@@ -285,6 +295,10 @@ class App:
             self.open_settings()
         elif flag == "--spotlight":
             self.spotlight.toggle()
+        elif flag == "--test-volume":  # открыть окно звука (для проверки)
+            from PySide6.QtCore import QRectF as _R
+            from .flyouts import VolumeFlyout
+            self.bar.toggle_flyout(VolumeFlyout, "vol", _R(self.bar.width() - 420, 0, 30, self.bar.H))
         elif flag == "--show":
             # MiniDock запустили ещё раз: показать док и панель (даже если считали, что идёт игра) и ответить
             self.fullscreen = False

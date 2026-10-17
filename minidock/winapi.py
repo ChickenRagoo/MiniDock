@@ -388,10 +388,8 @@ def foreground_is_fullscreen():
         info = win32api.GetMonitorInfo(win32api.MonitorFromWindow(fg))
         if not info["Flags"] & 1:  # MONITORINFOF_PRIMARY: док и панель живут на основном мониторе
             return False
-        if user32.IsZoomed(fg):  # обычное развёрнутое окно — не игра
+        if user32.IsZoomed(fg):  # обычное развёрнутое окно — не игра (а браузер в F11 не «развёрнут» — он на весь экран)
             return False
-        if win32gui.GetWindowLong(fg, win32con.GWL_STYLE) & win32con.WS_CAPTION == win32con.WS_CAPTION:
-            return False  # окно с заголовком — не полноэкранное приложение
         rect = win32gui.GetWindowRect(fg)
     except Exception:
         return False
@@ -419,8 +417,6 @@ def fullscreen_monitor():
         return None
     try:
         if user32.IsZoomed(fg):
-            return None
-        if win32gui.GetWindowLong(fg, win32con.GWL_STYLE) & win32con.WS_CAPTION == win32con.WS_CAPTION:
             return None
         mon = win32api.MonitorFromWindow(fg)
         m = win32api.GetMonitorInfo(mon)["Monitor"]

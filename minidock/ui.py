@@ -16,7 +16,7 @@ MDL2 = "Segoe MDL2 Assets"
 ACCENT = QColor(10, 132, 255)
 
 # Общие настройки «стекла»
-GLASS = {"enabled": True}
+GLASS = {"enabled": True, "live": True, "radius": 18.0}
 
 
 def clamp(x, lo=0.0, hi=1.0):
@@ -271,11 +271,22 @@ def make_glass(widget, live_ms=0):
     return g
 
 
+class _StopLiveOnHide(QObject):
+    def eventFilter(self, obj, e):
+        if e.type() == e.Type.Hide:
+            self.parent().stop_live()
+        return False
+
+
 def prepare_glass(g):
-    """Перед показом окна снять размытый фон под ним (самого окна на экране ещё нет)."""
+    """Перед показом окна снять размытый фон под ним (самого окна на экране ещё нет); дальше, если можно, —
+    живой фон, пока окно открыто."""
     g.enabled = GLASS["enabled"]
     if g.enabled:
         g.refresh()
+        if g.start_live() and not hasattr(g, "_hide_filter"):
+            g._hide_filter = _StopLiveOnHide(g)
+            g.w.installEventFilter(g._hide_filter)
 
 
 def rounded_path(rect, radius):

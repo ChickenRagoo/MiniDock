@@ -191,7 +191,12 @@ class LiveThumbs:
 
 class WindowPreview(QWidget):
     """Предпросмотр окон приложения при наведении на иконку в доке."""
-    PAD, GAP, TITLE_H = 14.0, 16.0, 22.0
+    GAP, TITLE_H = 16.0, 22.0
+
+    @property
+    def PAD(self):
+        """Прозрачный ободок вокруг миниатюр (настройка «Толщина рамки»)."""
+        return float(self.cfg["dock_preview_pad"])
 
     def __init__(self, app):
         super().__init__(None, TOP_FLAGS)

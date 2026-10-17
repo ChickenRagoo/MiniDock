@@ -24,11 +24,13 @@ DEFAULT_CFG = {
     "switcher_position": "center",  # center | upper
     "switcher_minimized": True,   # показывать приложения, у которых все окна свёрнуты
     "switcher_genie": True,       # свёрнутое окно разворачивается «джинном» из дока
+    "switcher_style": "mac",      # mac — значки программ и окна выбранной; windows — миниатюры всех окон
     "switcher_hover": True,       # наведение мыши показывает окна приложения (переключает только клик)
     "switcher_previews": True,    # живые миниатюры окон выбранного приложения
     "switcher_preview": 240,      # ширина миниатюры, px
     "dock_previews": True,        # миниатюры окон при наведении на иконку в доке
     "dock_preview": 220,          # ширина миниатюры в доке, px
+    "dock_preview_pad": 8,        # толщина рамки вокруг миниатюр предпросмотра в доке
     "dock_preview_delay": 0.45,   # через сколько секунд наведения показывать
     "spotlight": True,            # поиск Spotlight по Alt+Space
     # док
@@ -49,6 +51,8 @@ DEFAULT_CFG = {
     "dock_color": "#202026",
     "dock_opacity": 95,           # 0..255 поверх размытия
     "dock_blur": True,
+    "glass_live": True,           # живой фон «стекла» (лупа Windows), иначе — снимок в момент появления
+    "glass_radius": 18,           # сила размытия
     "dock_radius": 0.3,           # скругление, доля размера иконки
     "dock_border": True,
     # анимации окон

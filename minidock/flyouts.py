@@ -5,18 +5,23 @@ import re
 import subprocess
 import threading
 
+import numpy as np
 import psutil
 import win32con
 import win32gui
 import win32process
 from PySide6.QtCore import QDate, QLocale, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap, QTextCharFormat
-from PySide6.QtWidgets import (QApplication, QCalendarWidget, QGridLayout, QHBoxLayout, QLabel, QPushButton, QSlider,
-                               QTableView, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter, QPainterPath, QPen, QPixmap,
+                           QTextCharFormat)
+from PySide6.QtWidgets import (QApplication, QCalendarWidget, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
+                               QSlider, QTableView, QToolButton, QVBoxLayout, QWidget)
 
-from .ui import fade_in, make_glass, prepare_glass, rounded_path
-from .winapi import (enable_blur, force_foreground, kernel32, keyboard_layouts, lang_name, press_keys, round_window,
-                     tray_click, tray_icons, try_foreground, user32)
+from . import audio
+from .livecapture import blur_bgra
+from .media import MediaWatcher
+from .ui import MDL2, fade_in, make_glass, prepare_glass, rounded_path
+from .winapi import (enable_blur, file_icon, force_foreground, kernel32, keyboard_layouts, lang_name, press_keys,
+                     round_window, shell_icon_image, tray_click, tray_icons, try_foreground, user32)
 
 try:  # громкость (pycaw); импорт сразу при старте — поздний импорт comtypes бывает нестабилен
     from pycaw.pycaw import AudioUtilities
@@ -289,49 +294,363 @@ def volume_glyph(level, muted):
     return "" if level < 0.34 else "" if level < 0.67 else ""
 
 
-class VolumeFlyout(Flyout):
-    WIDTH = 300
+MIXER_QSS = """
+QLabel#section { color: rgba(255, 255, 255, 150); font: 600 9pt 'Segoe UI'; padding-top: 2px; }
+QLabel#dev { color: #f2f2f5; font: 9pt 'Segoe UI'; }
+QPushButton#ico { font: 12pt 'Segoe MDL2 Assets'; background: transparent; border-radius: 8px; padding: 0;
+                  min-width: 32px; max-width: 32px; min-height: 30px; max-height: 30px; text-align: center; }
+QPushButton#ico:hover { background: rgba(255, 255, 255, 30); }
+QPushButton#ico:checked { color: rgba(255, 255, 255, 110); }
+QPushButton#mix { font: 12pt 'Segoe MDL2 Assets'; background: transparent; border-radius: 8px; padding: 0;
+                  min-width: 32px; max-width: 32px; min-height: 30px; max-height: 30px; text-align: center; }
+QPushButton#mix:hover { background: rgba(255, 255, 255, 30); }
+QPushButton#mix:checked { background: rgba(92, 150, 166, 200); color: white; }
+QPushButton#seg { font: 9pt 'Segoe MDL2 Assets'; background: rgba(255, 255, 255, 14); border: 1px solid rgba(255, 255, 255, 40);
+                  padding: 0; min-width: 26px; max-width: 26px; min-height: 24px; max-height: 24px; text-align: center; }
+QPushButton#seg:hover { background: rgba(255, 255, 255, 40); }
+QPushButton#seg:checked { background: rgba(92, 150, 166, 235); border-color: rgba(120, 180, 196, 255); color: white; }
+QSlider#vol::groove:horizontal { height: 5px; background: rgba(255, 255, 255, 36); border-radius: 2px; }
+QSlider#vol::sub-page:horizontal { background: rgba(120, 172, 186, 255); border-radius: 2px; }
+QSlider#vol::handle:horizontal { background: #f4f4f6; border: 3px solid rgba(120, 172, 186, 255); width: 12px;
+                                 height: 12px; margin: -7px 0; border-radius: 9px; }
+QSlider#appvol::groove:horizontal { height: 4px; background: rgba(255, 255, 255, 30); border-radius: 2px; }
+QSlider#appvol::sub-page:horizontal { background: rgba(245, 245, 248, 220); border-radius: 2px; }
+QSlider#appvol::handle:horizontal { background: white; width: 12px; margin: -4px 0; border-radius: 6px; }
+QPushButton#play { font: 13pt 'Segoe MDL2 Assets'; background: transparent; color: white; border-radius: 16px; padding: 0;
+                   min-width: 32px; max-width: 32px; min-height: 32px; max-height: 32px; text-align: center; }
+QPushButton#play:hover { background: rgba(255, 255, 255, 40); }
+"""
 
-    def build(self):
-        ep = volume_endpoint()
-        self.lay.addWidget(self.label("Звук", "title"))
-        if ep is None:
-            self.lay.addWidget(self.label("Не удалось подключиться к звуковому устройству", "dim"))
-            self.lay.addWidget(self.button("Микшер громкости", lambda: subprocess.Popen(["sndvol.exe"])))
-            return
-        vol, name = ep
+GLYPH_SPEAKER, GLYPH_MUTE, GLYPH_MIC, GLYPH_MIC_OFF = "", "", "", ""
+GLYPH_MIXER, GLYPH_SETTINGS = "", ""
+GLYPH_MUSIC, GLYPH_PHONE = "", ""
+GLYPH_PREV, GLYPH_PLAY, GLYPH_PAUSE, GLYPH_NEXT = "", "", "", ""
+
+_exe_cache = {}
+_icon_cache = {}
+
+
+def app_icon(app_id):
+    """Значок программы по её exe или ID приложения (как у медиа-сессий: «Spotify.exe», «chrome.exe»)."""
+    if app_id in _icon_cache:
+        return _icon_cache[app_id]
+    pix = None
+    path = app_id if os.path.isabs(app_id) else None
+    if path is None and app_id.lower().endswith(".exe"):
+        path = _exe_cache.get(app_id.lower())
+        if path is None:
+            for p in psutil.process_iter(["name", "exe"]):
+                if (p.info["name"] or "").lower() == app_id.lower() and p.info["exe"]:
+                    path = _exe_cache[app_id.lower()] = p.info["exe"]
+                    break
+    try:
+        if path:
+            pix = file_icon(path)
+        else:  # приложение Microsoft Store — значок как в меню «Пуск»
+            from win32com.shell import shell, shellcon
+            _, pidl, _ = shell.SHGetDesktopFolder().ParseDisplayName(0, None, "shell:AppsFolder\\" + app_id)
+            _, info = shell.SHGetFileInfo(pidl, 0, shellcon.SHGFI_PIDL | shellcon.SHGFI_SYSICONINDEX)
+            pix = QPixmap.fromImage(shell_icon_image(info[1]))
+    except Exception:
+        pix = None
+    _icon_cache[app_id] = pix
+    return pix
+
+
+def blurred(img, size, radius=18):
+    """Сильно размытая и затемнённая копия картинки (фон карточки плеера)."""
+    small = img.scaled(max(size.width() // 6, 8), max(size.height() // 6, 8), Qt.KeepAspectRatioByExpanding,
+                       Qt.SmoothTransformation).convertToFormat(QImage.Format_RGB32)
+    w, h = small.width(), small.height()
+    a = np.frombuffer(small.constBits(), np.uint8, small.bytesPerLine() * h).reshape(h, small.bytesPerLine() // 4,
+                                                                                     4)[:, :w, :3]
+    out = blur_bgra(a.astype(np.float32), radius / 6, saturation=1.25)
+    return QImage(out.data, w, h, w * 4, QImage.Format_RGB32).copy()
+
+
+class MediaCard(QWidget):
+    """Карточка плеера: размытая обложка фоном, обложка со значком программы, название, исполнитель, кнопки."""
+    H = 122
+
+    def __init__(self, info, watcher):
+        super().__init__()
+        self.info, self.watcher = info, watcher
+        self.setFixedHeight(self.H)
+        self.cover = QImage.fromData(info["cover"]) if info["cover"] else QImage()
+        self.bg = None
+        self.icon = app_icon(info["app"])
+        self.f_title = QFont("Segoe UI", 13, QFont.DemiBold)
+        self.f_artist = QFont("Segoe UI", 9)
+        self.buttons = []
+        for glyph, action in ((GLYPH_PREV, "prev"), (GLYPH_PAUSE if info["playing"] else GLYPH_PLAY, "toggle"),
+                              (GLYPH_NEXT, "next")):
+            b = QPushButton(glyph, self)
+            b.setObjectName("play")
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, a=action: watcher.control(info["id"], a))
+            self.buttons.append(b)
+
+    def resizeEvent(self, e):
+        self.bg = None
+        x0 = self.H - 8 + (self.width() - self.H) / 2
+        for i, b in enumerate(self.buttons):
+            b.move(int(x0 + (i - 1) * 54 - 16), self.H - 46)
+
+    def paintEvent(self, _):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        card = rounded_path(self.rect(), 12)
+        p.setClipPath(card)
+        if not self.cover.isNull():
+            if self.bg is None:
+                self.bg = blurred(self.cover, self.size())
+            p.drawImage(QRectF(self.rect()), self.bg, QRectF(self.bg.rect()))
+            p.fillRect(self.rect(), QColor(10, 10, 16, 120))
+        else:
+            p.fillRect(self.rect(), QColor(255, 255, 255, 22))
+        p.setClipping(False)
+        p.setPen(QColor(255, 255, 255, 40))
+        p.drawPath(card)
+        art = QRectF(10, 10, self.H - 20, self.H - 20)
+        ap = rounded_path(art, 9)
+        if not self.cover.isNull():
+            p.save()
+            p.setClipPath(ap)
+            c = self.cover
+            side = min(c.width(), c.height())
+            src = QRectF((c.width() - side) / 2, (c.height() - side) / 2, side, side)
+            p.drawImage(art, c, src)
+            p.restore()
+        else:
+            p.fillPath(ap, QColor(255, 255, 255, 30))
+            p.setFont(QFont(MDL2, 26))
+            p.setPen(QColor(255, 255, 255, 160))
+            p.drawText(art, Qt.AlignCenter, GLYPH_MUSIC)
+        if self.icon is not None and not self.icon.isNull():
+            badge = QRectF(art.right() - 30, art.bottom() - 30, 26, 26)
+            p.drawPixmap(badge, self.icon, QRectF(self.icon.rect()))
+        text = QRectF(art.right() + 10, 14, self.width() - art.right() - 20, 30)
+        p.setFont(self.f_title)
+        p.setPen(QColor(255, 255, 255))
+        fm = QFontMetricsF(self.f_title)
+        p.drawText(text, Qt.AlignHCenter | Qt.AlignVCenter,
+                   fm.elidedText(self.info["title"] or "Без названия", Qt.ElideRight, text.width()))
+        p.setFont(self.f_artist)
+        p.setPen(QColor(255, 255, 255, 200))
+        fa = QFontMetricsF(self.f_artist)
+        sub = QRectF(text.left(), text.bottom(), text.width(), 20)
+        p.drawText(sub, Qt.AlignHCenter | Qt.AlignVCenter, fa.elidedText(self.info["artist"], Qt.ElideRight, sub.width()))
+
+
+class VolumeFlyout(Flyout):
+    """Звук в стиле Seelen UI: общая громкость и микрофон, громкость программ, выбор устройств вывода и ввода
+    (отдельно для музыки и для связи), карточки всего, что сейчас играет."""
+    WIDTH = 400
+    watcher = None
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.setStyleSheet(FLYOUT_QSS + MIXER_QSS)
+        if VolumeFlyout.watcher is None:
+            VolumeFlyout.watcher = MediaWatcher()
+        self.watcher.sessions.connect(self.on_media)
+        self.media_box = None
+        self.media_state = None
+        self.apps_open = False
+        self.media_timer = QTimer(self, interval=1500, timeout=self.watcher.refresh)
+
+    # -- построение
+    def section(self, text):
+        lab = QLabel(text)
+        lab.setObjectName("section")
+        return lab
+
+    def line(self):
+        f = QFrame()
+        f.setFixedHeight(1)
+        f.setStyleSheet("background: rgba(255, 255, 255, 30);")
+        return f
+
+    def icon_button(self, glyph, cb, checkable=False):
+        b = QPushButton(glyph)
+        b.setObjectName("ico")
+        b.setCursor(Qt.PointingHandCursor)
+        b.setCheckable(checkable)
+        b.clicked.connect(cb)
+        return b
+
+    def volume_row(self, vol, glyph, glyph_off, extra):
         row = QHBoxLayout()
-        self.mute = QPushButton()
-        self.mute.setObjectName("round")
-        self.mute.setCheckable(True)
-        self.mute.setChecked(bool(vol.GetMute()))
-        self.slider = QSlider(Qt.Horizontal)
-        self.slider.setRange(0, 100)
-        self.slider.setValue(round(vol.GetMasterVolumeLevelScalar() * 100))
-        self.value = QLabel()
-        self.value.setFixedWidth(34)
-        row.addWidget(self.mute)
-        row.addWidget(self.slider, 1)
-        row.addWidget(self.value)
-        self.lay.addLayout(row)
-        self.lay.addWidget(self.label(name, "dim"))
-        self.lay.addWidget(self.button("Микшер громкости", lambda: subprocess.Popen(["sndvol.exe"])))
-        self.lay.addWidget(self.button("Параметры звука…", lambda: os.startfile("ms-settings:sound")))
+        row.setSpacing(8)
+        mute = self.icon_button(glyph, lambda: None, checkable=True)
+        slider = QSlider(Qt.Horizontal)
+        slider.setObjectName("vol")
+        slider.setRange(0, 100)
+        try:
+            slider.setValue(round(vol.GetMasterVolumeLevelScalar() * 100))
+            mute.setChecked(bool(vol.GetMute()))
+        except Exception:
+            pass
+        mute.setText(glyph_off if mute.isChecked() else glyph)
 
         def apply():
-            v = self.slider.value()
             try:
-                vol.SetMasterVolumeLevelScalar(v / 100, None)
-                vol.SetMute(int(self.mute.isChecked()), None)
+                vol.SetMasterVolumeLevelScalar(slider.value() / 100, None)
+                vol.SetMute(int(mute.isChecked()), None)
             except Exception:
                 pass
-            self.value.setText(f"{v}%")
-            self.mute.setText(volume_glyph(v / 100, self.mute.isChecked()))
+            mute.setText(glyph_off if mute.isChecked() else glyph)
             self.bar.refresh()
-        self.slider.valueChanged.connect(apply)
-        self.mute.toggled.connect(apply)
-        self.value.setText(f"{self.slider.value()}%")
-        self.mute.setText(volume_glyph(self.slider.value() / 100, self.mute.isChecked()))
+        slider.valueChanged.connect(apply)
+        mute.toggled.connect(apply)
+        row.addWidget(mute)
+        row.addWidget(slider, 1)
+        row.addWidget(extra)
+        return row
+
+    def device_rows(self, flow):
+        box = QVBoxLayout()
+        box.setSpacing(4)
+        for d in audio.devices(flow):
+            row = QHBoxLayout()
+            row.setSpacing(0)
+            for glyph, comm, side in ((GLYPH_MUSIC, False, "segL"), (GLYPH_PHONE, True, "segR")):
+                b = QPushButton(glyph)
+                b.setObjectName("seg")
+                b.setCheckable(True)
+                b.setChecked(d["comm"] if comm else d["media"])
+                b.setToolTip("Для звонков" if comm else "Для музыки и игр")
+                b.setCursor(Qt.PointingHandCursor)
+                radius = "border-top-left-radius: 7px; border-bottom-left-radius: 7px;" if side == "segL" else \
+                    "border-top-right-radius: 7px; border-bottom-right-radius: 7px; border-left: none;"
+                b.setStyleSheet(radius)
+                b.clicked.connect(lambda _=False, did=d["id"], c=comm: self.pick_device(did, c))
+                row.addWidget(b)
+            row.addSpacing(10)
+            name = QLabel()
+            name.setObjectName("dev")
+            name.setText(QFontMetricsF(QFont("Segoe UI", 9)).elidedText(d["name"], Qt.ElideRight, self.WIDTH - 110))
+            name.setToolTip(d["name"])
+            row.addWidget(name, 1)
+            box.addLayout(row)
+        return box
+
+    def pick_device(self, device_id, comm):
+        audio.set_default(device_id, comm)
+        QTimer.singleShot(150, self.rebuild)
+
+    def apps_box(self):
+        box = QVBoxLayout()
+        box.setSpacing(6)
+        for a in audio.app_sessions():
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            icon = QLabel()
+            pix = app_icon(a["exe"])
+            if pix is not None and not pix.isNull():
+                icon.setPixmap(pix.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            icon.setFixedWidth(22)
+            name = QLabel(os.path.splitext(a["name"])[0])
+            name.setFixedWidth(110)
+            s = QSlider(Qt.Horizontal)
+            s.setObjectName("appvol")
+            s.setRange(0, 100)
+            try:
+                s.setValue(round(a["volumes"][0].GetMasterVolume() * 100))
+            except Exception:
+                pass
+
+            def set_vol(v, vols=a["volumes"]):
+                for sv in vols:
+                    try:
+                        sv.SetMasterVolume(v / 100, None)
+                    except Exception:
+                        pass
+            s.valueChanged.connect(set_vol)
+            row.addWidget(icon)
+            row.addWidget(name)
+            row.addWidget(s, 1)
+            box.addLayout(row)
+        if not box.count():
+            box.addWidget(self.label("Сейчас ни одна программа не воспроизводит звук", "dim"))
+        return box
+
+    def toggle_apps(self):
+        self.apps_open = not self.apps_open
+        self.rebuild()
+
+    def build(self):
+        self.lay.setSpacing(8)
+        if not audio.available():
+            self.lay.addWidget(self.label("Не удалось подключиться к звуковым устройствам", "dim"))
+            self.lay.addWidget(self.button("Параметры звука…", lambda: os.startfile("ms-settings:sound")))
+            return
+        self.lay.addWidget(self.section("Общая громкость"))
+        out = audio.default_volume(audio.OUTPUT)
+        mic = audio.default_volume(audio.INPUT)
+        mixer = self.icon_button(GLYPH_MIXER, self.toggle_apps, checkable=True)
+        mixer.setObjectName("mix")  # включённая — подсвечена (у кнопок звука «нажато» значит «выключено»)
+        mixer.setChecked(self.apps_open)
+        mixer.setToolTip("Громкость программ")
+        if out is not None:
+            self.lay.addLayout(self.volume_row(out, GLYPH_SPEAKER, GLYPH_MUTE, mixer))
+        if self.apps_open:
+            self.lay.addLayout(self.apps_box())
+        if mic is not None:
+            settings = self.icon_button(GLYPH_SETTINGS, lambda: (self.close(), os.startfile("ms-settings:sound")))
+            settings.setToolTip("Параметры звука")
+            self.lay.addLayout(self.volume_row(mic, GLYPH_MIC, GLYPH_MIC_OFF, settings))
+        self.lay.addWidget(self.line())
+        self.lay.addWidget(self.section("Устройство вывода"))
+        self.lay.addLayout(self.device_rows(audio.OUTPUT))
+        self.lay.addWidget(self.line())
+        self.lay.addWidget(self.section("Устройство ввода"))
+        self.lay.addLayout(self.device_rows(audio.INPUT))
+        self.media_box = QVBoxLayout()
+        self.media_box.setSpacing(8)
+        self.lay.addLayout(self.media_box)
+        self.fill_media()
+
+    def rebuild(self):
+        self.clear()
+        self.build()
+        self.refit()
+
+    # -- плееры
+    def on_media(self, sessions):
+        state = [(s["app"], s["title"], s["artist"], s["playing"], bool(s["cover"])) for s in sessions]
+        if state == self.media_state:
+            return
+        self.media_state = state
+        self.sessions = sessions
+        if self.isVisible():
+            self.fill_media()
+            self.refit()
+
+    def fill_media(self):
+        if self.media_box is None:
+            return
+        while self.media_box.count():
+            item = self.media_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        sessions = getattr(self, "sessions", [])
+        if not sessions:
+            return
+        self.media_box.addWidget(self.line())
+        self.media_box.addWidget(self.section("Медиаплееры"))
+        for s in sessions:
+            self.media_box.addWidget(MediaCard(s, self.watcher))
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.watcher.refresh()
+        self.media_timer.start()
+
+    def hideEvent(self, e):
+        self.media_timer.stop()
+        super().hideEvent(e)
 
 
 class ClockFlyout(Flyout):

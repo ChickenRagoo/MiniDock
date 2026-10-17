@@ -330,6 +330,7 @@ class SettingsWindow(QWidget):
             self.toggle("dock_previews", "Миниатюры окон при наведении",
                         "Наведите на запущенное приложение: клик по миниатюре — открыть окно, крестик — закрыть."),
             self.slider("dock_preview", "Размер миниатюр", 140, 360, fmt="{:.0f} px"),
+            self.slider("dock_preview_pad", "Толщина рамки", 2, 24, fmt="{:.0f} px"),
             self.slider("dock_preview_delay", "Задержка показа", 0, 1.5, scale=100, fmt="{:.2f} с"),
             self.toggle("bounce", "Подпрыгивание при запуске"),
             self.combo("indicator", "Индикатор запущенных",
@@ -343,8 +344,11 @@ class SettingsWindow(QWidget):
         self.group(lay, [
             self.color("dock_color", "Цвет фона"),
             self.slider("dock_opacity", "Непрозрачность фона", 0, 255, fmt="{:.0f}"),
-            self.toggle("dock_blur", "Размытие под доком",
-                        "Работает при автоскрытии: фон снимается, пока док спрятан."),
+            self.toggle("dock_blur", "Размытие под доком"),
+            self.toggle("glass_live", "Живое размытие",
+                        "Фон под доком и всплывающими окнами обновляется на лету — окна под ними двигаются. "
+                        "Если выключить, фон снимается один раз при появлении (чуть меньше нагрузки)."),
+            self.slider("glass_radius", "Сила размытия", 4, 40, fmt="{:.0f}"),
             self.slider("dock_radius", "Скругление углов", 0, 0.5, scale=100, fmt="{:.2f}"),
             self.toggle("dock_border", "Светлая обводка"),
         ])
@@ -396,6 +400,9 @@ class SettingsWindow(QWidget):
         self.group(lay, [
             self.toggle("custom_switcher", "Свой переключатель вместо системного",
                         "Alt+Tab / Alt+Shift+Tab, стрелки, мышь. Q — закрыть приложение, Esc — отмена."),
+            self.combo("switcher_style", "Стиль", [("Значки программ и их окна (как в macOS)", "mac"),
+                                                   ("Миниатюры всех окон (как в Windows)", "windows")],
+                       "Во втором стиле у каждой миниатюры внизу — значок программы."),
             self.button_row("Посмотреть, как выглядит", "Показать", self.preview_switcher),
         ])
         self.group(lay, [

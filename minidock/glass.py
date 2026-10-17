@@ -7,6 +7,7 @@
 Полупрозрачные окна Qt нельзя исключить из захвата экрана, поэтому фон снимается, пока панели
 на этом месте нет: всплывающие окна — перед показом, док — пока спрятан и в момент появления.
 """
+import os
 import threading
 
 import numpy as np
@@ -55,7 +56,8 @@ class Glass(QObject):
     def __init__(self, widget, live_ms=0, radius=18.0):
         super().__init__(widget)
         self.w = widget
-        self.radius = radius
+        self.base_radius = radius
+        self.live_on = False    # живой фон: участок под окном снимается на лету (лупой Windows, без самого окна)
         self.pix = None
         self.transform = QTransform()
         self.enabled = True
@@ -66,16 +68,63 @@ class Glass(QObject):
         self.timer = QTimer(self, interval=live_ms or 1000, timeout=self.refresh_async)
         self.ready.connect(self._apply)
 
+    @property
+    def radius(self):
+        from .ui import GLASS
+        return float(GLASS.get("radius", self.base_radius))
+
     def start(self):
         if self.live:
             self.timer.start()
 
+    # -- живой фон
+    def start_live(self):
+        """Включить живой фон, если он доступен и включён в настройках. True — включён."""
+        from .livecapture import live_capture
+        from .ui import GLASS
+        if not self.enabled or not GLASS.get("live", True):
+            return False
+        lc = live_capture()
+        if lc is None:
+            return False
+        if not self.live_on:
+            self.live_on = True
+            lc.frame.connect(self._on_live)
+        self._push(lc)
+        return True
+
+    def stop_live(self):
+        if self.live_on:
+            from .livecapture import live_capture
+            lc = live_capture()
+            self.live_on = False
+            if lc is not None:
+                lc.remove(id(self))
+                try:
+                    lc.frame.disconnect(self._on_live)
+                except (RuntimeError, TypeError):
+                    pass
+
+    def _push(self, lc):
+        rect = self.target(live=True)
+        if rect:
+            lc.set_job(id(self), rect, self.radius * self.w.devicePixelRatioF() / DOWNSCALE)
+
+    def _on_live(self, cid, img, rect):
+        if cid != id(self) or not self.live_on:
+            return
+        self._apply(img, rect)
+        from .livecapture import live_capture
+        lc = live_capture()
+        if lc is not None:
+            self._push(lc)  # окно могло сдвинуться или вырасти — следующий кадр снимаем уже по новому месту
+
     def stop(self):
         self.timer.stop()
 
-    def target(self):
+    def target(self, live=False):
         """Какой участок экрана снимать: (x0, y0, x1, y1) в физических пикселях или None."""
-        if not self.enabled or (self.can_capture and not self.can_capture()):
+        if not self.enabled or (not live and self.can_capture and not self.can_capture()):
             return None
         r = self.region() if self.region else QRectF(self.w.rect())
         if r is None or r.width() < 2 or r.height() < 2:
