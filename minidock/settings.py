@@ -11,7 +11,7 @@ from .barwidgets import WIDGETS_DIR
 from .config import CFG_DIR, DEFAULT_CFG
 from .updater import PAGE
 from .version import __version__
-from .ui import BG_PARTS, GLASS_PARTS, MDL2, Toggle, fade_in, rounded_path
+from .ui import BG_PARTS, GLASS_PARTS, MDL2, Toggle, animate, fade_in, rounded_path
 from .winapi import autostart_enabled, enable_blur, round_window, set_autostart
 
 QSS = """
@@ -37,9 +37,13 @@ QSlider::groove:horizontal { height: 4px; background: rgba(255, 255, 255, 40); b
 QSlider::sub-page:horizontal { background: #0a84ff; border-radius: 2px; }
 QSlider::handle:horizontal { background: white; width: 16px; height: 16px; margin: -6px 0; border-radius: 8px; }
 QScrollArea { border: none; }
-QScrollBar:vertical { width: 8px; background: transparent; }
-QScrollBar::handle:vertical { background: rgba(255, 255, 255, 50); border-radius: 4px; min-height: 30px; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+QScrollBar:vertical { width: 10px; background: transparent; border: none; margin: 6px 2px 6px 0; }
+QScrollBar::handle:vertical { background: rgba(255, 255, 255, 45); border-radius: 4px; min-height: 36px;
+                              margin: 0 1px; }
+QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 95); margin: 0; }
+QScrollBar::handle:vertical:pressed { background: rgba(255, 255, 255, 130); margin: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; background: transparent; }
 """
 
 PAGES = [
@@ -70,6 +74,38 @@ class TrafficLight(QPushButton):
         p.setPen(QPen(self.color.darker(130), 0.8))
         p.setBrush(self.color)
         p.drawEllipse(QRectF(1, 1, 12, 12))
+
+
+class SmoothScrollArea(QScrollArea):
+    """Прокрутка колесом не рывками по строке, а плавно доезжает до цели (как в браузере)."""
+
+    def __init__(self):
+        super().__init__()
+        self.target = None
+        self._anim = None
+
+    def wheelEvent(self, e):
+        bar = self.verticalScrollBar()
+        dy = e.pixelDelta().y() or e.angleDelta().y() / 120 * 90  # тачпад — как есть, колесо — 90 px за щелчок
+        if not dy:
+            return super().wheelEvent(e)
+        start = bar.value()
+        base = self.target if self.target is not None and self._anim is not None else start
+        self.target = max(bar.minimum(), min(bar.maximum(), round(base - dy)))
+        end = self.target
+
+        def step(v):
+            bar.setValue(round(start + (end - start) * v))
+
+        def done():
+            self._anim, self.target = None, None
+        try:
+            if self._anim is not None:
+                self._anim.stop()
+        except RuntimeError:
+            pass
+        self._anim = animate(self, 220, step, done)
+        e.accept()
 
 
 class SettingsWindow(QWidget):
@@ -150,7 +186,7 @@ class SettingsWindow(QWidget):
 
     # -- builders
     def scroll(self, page):
-        area = QScrollArea()
+        area = SmoothScrollArea()
         area.setWidgetResizable(True)
         area.setWidget(page)
         area.viewport().setAutoFillBackground(False)

@@ -80,6 +80,9 @@ class GenieItem(QQuickItem):
         mat = QSGTextureMaterial()
         mat.setFiltering(QSGTexture.Linear)
         mat.setMipmapFiltering(QSGTexture.Linear)
+        # «джинн» сжимает окно неравномерно (сильно по высоте, слабо по ширине): обычная трилинейная фильтрация
+        # берёт уровень мипмапа по сильному сжатию и замыливает снимок во все стороны. Анизотропная — нет.
+        mat.setAnisotropyLevel(QSGTexture.Anisotropy16x)
         tex = self.window().createTextureFromImage(self.blank)
         mat.setTexture(tex)
         gn.setMaterial(mat)
