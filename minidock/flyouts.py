@@ -136,11 +136,18 @@ class Flyout(QWidget):
     def hideEvent(self, e):
         self.bar.flyout_closed(self)
 
-    def paintEvent(self, _):
+    panel_h = None  # высота нарисованной панели во время анимации (None — всё окно)
+
+    def paintEvent(self, e):
         p = QPainter(self)
+        # стираем прошлый кадр сами: иначе при анимации полупрозрачные кадры наслаиваются
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillRect(e.rect(), Qt.transparent)
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
-        path = rounded_path(self.rect(), 12)
+        h = self.height() if self.panel_h is None else min(self.panel_h, self.height())
+        path = rounded_path(QRectF(0, 0, self.width(), h), 12)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(34, 34, 40, 150))
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
@@ -436,36 +443,41 @@ class SegPair(QWidget):
 
 
 class Collapsible(QWidget):
-    """Блок, который плавно раскрывается и сворачивается по высоте (окно растёт вместе с ним)."""
+    """Блок, который плавно раскрывается и сворачивается по высоте, как шторка: содержимое всегда полного
+    размера и просто обрезается (не сплющивается). Размер окна во время анимации не меняется — на каждом
+    шаге окно только перерисовывает панель нужной высоты (on_step)."""
 
     def __init__(self, on_step):
         super().__init__()
         self.on_step = on_step
-        self.box = QVBoxLayout(self)
+        self.inner = QWidget(self)
+        self.box = QVBoxLayout(self.inner)
         self.box.setContentsMargins(0, 0, 0, 0)
         self.box.setSpacing(6)
         self.open = False
-        self.setMaximumHeight(0)
+        self.setFixedHeight(0)
+
+    def current(self):
+        return self.height()
+
+    def full_height(self):
+        self.box.activate()
+        return self.inner.sizeHint().height()
+
+    def resizeEvent(self, e):
+        self.inner.setGeometry(0, 0, self.width(), self.full_height())
 
     def toggle(self, open_, done=None):
         self.open = open_
-        self.box.activate()
-        # от текущей видимой высоты (а не от «без ограничения», которое ставится после раскрытия)
-        start = min(self.maximumHeight(), self.height()) if self.isVisible() else 0
-        end = 0
-        if open_:  # полная высота содержимого: пока блок сжат до нуля, раскладка её не считает
-            self.setMaximumHeight(16777215)
-            self.box.activate()
-            end = self.box.totalSizeHint().height()
-            self.setMaximumHeight(start)
+        start, end = self.current(), (self.full_height() if open_ else 0)
+        self.inner.setGeometry(0, 0, self.width(), self.full_height())
 
         def step(v):
-            self.setMaximumHeight(int(start + (end - start) * v))
+            self.setFixedHeight(int(start + (end - start) * v))
             self.on_step()
 
         def finished():
-            if open_:
-                self.setMaximumHeight(16777215)
+            self.setFixedHeight(end)
             self.on_step()
             if done:
                 done()
@@ -515,12 +527,12 @@ class MediaCard(QWidget):
             self.update()
         self._fade_anim = animate(self, 350, step, lambda: setattr(self, "layers", self.layers[-1:]))
 
-    def show_animated(self, on_step):
+    def show_animated(self, on_step, done=None):
         def step(v):
             self.appear = v
             self.setFixedHeight(int(self.H * v))
             on_step()
-        self._appear_anim = animate(self, 260, step)
+        self._appear_anim = animate(self, 260, step, done)
 
     def hide_animated(self, on_step, done):
         start = self.height()
@@ -780,7 +792,31 @@ class VolumeFlyout(Flyout):
                 self.fill_apps()
             else:
                 self.refresh_app_levels()  # список уже готов — только свежие уровни громкости
-        self.apps.toggle(on)
+            self.grow_by(self.apps.full_height() - self.apps.current())
+        self.apps.toggle(on, self.settle)
+
+    # -- плавное изменение высоты: окно меняет размер один раз, внутри анимируется панель
+    def content_height(self):
+        self.lay.activate()
+        return self.lay.totalSizeHint().height()
+
+    def grow_by(self, delta):
+        """Перед раскрытием: окно сразу итоговой высоты (прозрачный низ), панель пока прежней высоты."""
+        self.panel_h = self.content_height()
+        if delta > 0:
+            self.resize(self.width(), self.panel_h + delta)
+
+    def anim_step(self):
+        self.panel_h = self.content_height()
+        self.update()
+
+    def settle(self):
+        """Анимация закончилась: окно ровно по содержимому (после сворачивания — уменьшается один раз)."""
+        h = self.content_height()
+        self.panel_h = None
+        if h != self.height():
+            self.resize(self.width(), h)
+        self.update()
 
     def prefill_apps(self):
         """Список программ и их значки готовим сразу после открытия окна — раскрытие потом мгновенное."""
@@ -811,7 +847,7 @@ class VolumeFlyout(Flyout):
         mixer.toggled.connect(self.toggle_apps)
         self.mixer_button = mixer
         self.lay.addLayout(self.volume_row(audio.OUTPUT, GLYPH_SPEAKER, GLYPH_MUTE, mixer))
-        self.apps = Collapsible(self.refit)
+        self.apps = Collapsible(self.anim_step)
         self.lay.addWidget(self.apps)
         settings = self.icon_button(GLYPH_SETTINGS, lambda: (self.close(), os.startfile("ms-settings:sound")))
         settings.setToolTip("Параметры звука")
@@ -835,6 +871,7 @@ class VolumeFlyout(Flyout):
         self.lay.addLayout(self.media_box)
         for s in getattr(self, "sessions", []):  # последние известные плееры — сразу, без анимации
             self.add_card(s, animated=False)
+        self.lay.addStretch(1)  # пока окно выше содержимого (анимация), всё прижато кверху
 
     # -- плееры: обновляются на месте
     @staticmethod
@@ -843,11 +880,17 @@ class VolumeFlyout(Flyout):
 
     def add_card(self, s, animated=True):
         card = MediaCard(s, self.watcher)
+        before = self.content_height() if animated else 0
         self.cards[self.card_key(s)] = card
         self.media_box.addWidget(card)
         self.media_head.setVisible(True)
         if animated:
-            card.show_animated(self.refit)
+            # окно сразу итоговой высоты (вместе с заголовком «Медиаплееры», если он только что появился)
+            need = self.content_height() + card.H
+            self.panel_h = before
+            if need > self.height():
+                self.resize(self.width(), need)
+            card.show_animated(self.anim_step, self.settle)
         else:
             card.appear = 1.0
             card.setFixedHeight(card.H)
@@ -872,8 +915,9 @@ class VolumeFlyout(Flyout):
                 self.media_box.removeWidget(c)
                 c.deleteLater()
                 self.media_head.setVisible(bool(self.cards))
-                self.refit()
-            card.hide_animated(self.refit, gone)
+                self.settle()
+            self.panel_h = self.content_height()
+            card.hide_animated(self.anim_step, gone)
 
     def resizeEvent(self, e):
         if self.isVisible():
