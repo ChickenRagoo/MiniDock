@@ -253,7 +253,7 @@ class Dock(QWidget):
         экран — каждый кадр Windows копирует окно целиком, узкое окно рисуется в такт монитору."""
         items = self.items()
         gap = self.B * float(self.cfg["spacing"])
-        base = sum(self.B * 0.3 if it.kind == "sep" else self.B for it in items) + gap * max(len(items) - 1, 0)
+        base = sum(self.base_width(it) for it in items) + gap * max(len(items) - 1, 0)
         return int(base + 2 * self.pad + self.B * (self.mag - 1) * 3.5 + 2 * 170)
 
     def fitted(self, area):
@@ -315,6 +315,15 @@ class Dock(QWidget):
             items += [self.sep2, self.trash]
         return items
 
+    def base_width(self, it):
+        """Длина элемента вдоль дока: иконка — B, разделитель — узкий, виджет — сколько он просит (плеер шире)."""
+        if it.kind == "sep":
+            return self.B * 0.3
+        if it.kind == "widget":
+            cls = self.app.widgets.classes.get(it.widget)
+            return self.B * max(1.0, float(getattr(cls, "dock_width", 1.0) or 1.0))
+        return self.B
+
     def layout(self):
         B, mag, pad = self.B, self.mag, self.pad
         gap = B * float(self.cfg["spacing"])
@@ -322,7 +331,7 @@ class Dock(QWidget):
         items = self.items()
         if self.dragging and self.drag_remove():
             items = [it for it in items if it is not self.press_item]
-        base = [B * 0.3 if it.kind == "sep" else B for it in items]
+        base = [self.base_width(it) for it in items]
         base_total = sum(base) + gap * (len(items) - 1) + 2 * pad
         u = (L - base_total) / 2 + pad
         self.base_span = ((L - base_total) / 2, (L + base_total) / 2)
@@ -331,7 +340,7 @@ class Dock(QWidget):
             c = u + w / 2
             u += w + gap
             s = 1.0
-            if it.kind != "sep" and self.hover > 0 and mag > 1:
+            if it.kind != "sep" and w <= B and self.hover > 0 and mag > 1:  # широкие виджеты не увеличиваются
                 d, reach = abs(self.mouse_u - c), B * 2.6
                 if d < reach:
                     s += (mag - 1) * (math.cos(math.pi * d / reach) + 1) / 2 * self.hover
@@ -344,6 +353,8 @@ class Dock(QWidget):
         for it, s in zip(items, sizes):
             if it.kind == "sep":
                 rects.append((it, QRectF(u, v0 + pad * 1.4, s, B - pad * 0.8)))
+            elif s > B * 1.01 and it.kind == "widget":
+                rects.append((it, QRectF(u, v0 + pad, s, B)))  # широкий виджет — высотой с иконку
             else:
                 rects.append((it, QRectF(u, v0 + pad, s, s)))
             u += s + gap
@@ -777,10 +788,23 @@ class Dock(QWidget):
                 self.save_pinned()
         elif self.rect().contains(e.position().toPoint()):
             # клик засчитываем по иконке, на которую нажали: от увеличения она могла съехать из-под курсора
+            self.last_click = e.position()
             self.activate(it)
 
     def activate(self, it, new_window=False):
         if it.kind == "widget":
+            # сначала сам виджет: у плеера клик по кнопкам управляет музыкой, а не открывает окно
+            host = self.app.widgets
+            inst = host.instance(it.widget)
+            pos = getattr(self, "last_click", None)
+            if inst is not None and getattr(inst, "click", None) and it.cur is not None and pos is not None:
+                try:
+                    if inst.click(self.to_win_rect(it.cur), pos, host.data.get(it.widget)):
+                        host.poke(it.widget)
+                        self.update()
+                        return
+                except Exception:
+                    pass
             self.open_widget(it)
             return
         if it.kind == "trash":

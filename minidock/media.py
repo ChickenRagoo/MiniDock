@@ -15,38 +15,39 @@ except Exception:  # пакетов winrt нет — карточек плеер
 PLAYING = 4
 
 
-class MediaWatcher(QObject):
-    """sessions(list) — список dict(id, app, title, artist, playing, cover: bytes | None)."""
-    sessions = Signal(list)
+class MediaCore:
+    """Медиа-сессии без Qt: свой поток с циклом asyncio. Им пользуются окно звука и виджет плеера в доке."""
 
     def __init__(self):
-        super().__init__()
         self.loop = None
         self.manager = None
-        self.covers = {}  # (приложение, название) -> байты обложки: не перечитываем одно и то же
+        self.covers = {}  # (приложение, название, исполнитель) -> байты обложки: не перечитываем одно и то же
         self.available = Manager is not None
         if self.available:
-            threading.Thread(target=self._run, daemon=True, name="MiniDockMedia").start()
+            ready = threading.Event()
+            threading.Thread(target=self._run, args=(ready,), daemon=True, name="MiniDockMedia").start()
+            ready.wait(2)
 
-    def _run(self):
+    def _run(self, ready):
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
+        ready.set()
         self.loop.run_forever()
 
-    def _submit(self, coro):
+    def submit(self, coro):
+        """Запустить корутину в потоке медиа; future (concurrent.futures) или None."""
         if self.loop is None:
+            coro.close()
             return None
         return asyncio.run_coroutine_threadsafe(coro, self.loop)
 
-    # -- запросы из интерфейса
-    def refresh(self):
-        if self.available:
-            self._submit(self._collect())
-
-    def control(self, sid, action):
-        """action: toggle | next | prev."""
-        if self.available:
-            self._submit(self._control(sid, action))
+    def sessions(self, timeout=3.0):
+        """Синхронно (для фоновых потоков): список сессий, см. collect()."""
+        fut = self.submit(self.collect())
+        try:
+            return fut.result(timeout) if fut is not None else []
+        except Exception:
+            return []
 
     # -- в потоке asyncio
     async def _get_manager(self):
@@ -71,7 +72,8 @@ class MediaWatcher(QObject):
         self.covers[key] = data
         return data
 
-    async def _collect(self):
+    async def collect(self):
+        """[dict(id, app, title, artist, playing, cover: bytes | None)]."""
         out = []
         try:
             mgr = await self._get_manager()
@@ -88,9 +90,10 @@ class MediaWatcher(QObject):
                     continue
         except Exception:
             out = []
-        self.sessions.emit(out)
+        return out
 
-    async def _control(self, sid, action):
+    async def control(self, sid, action):
+        """action: toggle | next | prev."""
         try:
             mgr = await self._get_manager()
             sessions = list(mgr.get_sessions())
@@ -105,5 +108,42 @@ class MediaWatcher(QObject):
                 await s.try_skip_previous_async()
         except Exception:
             pass
+
+
+_core = None
+
+
+def media_core():
+    """Общее ядро медиа-сессий (создаётся при первом обращении)."""
+    global _core
+    if _core is None:
+        _core = MediaCore()
+    return _core
+
+
+class MediaWatcher(QObject):
+    """sessions(list) — список dict(id, app, title, artist, playing, cover: bytes | None)."""
+    sessions = Signal(list)
+
+    def __init__(self):
+        super().__init__()
+        self.core = media_core()
+        self.available = self.core.available
+
+    # -- запросы из интерфейса
+    def refresh(self):
+        if self.available:
+            self.core.submit(self._collect())
+
+    def control(self, sid, action):
+        """action: toggle | next | prev."""
+        if self.available:
+            self.core.submit(self._control(sid, action))
+
+    async def _collect(self):
+        self.sessions.emit(await self.core.collect())
+
+    async def _control(self, sid, action):
+        await self.core.control(sid, action)
         await asyncio.sleep(0.25)
         await self._collect()

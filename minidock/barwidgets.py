@@ -62,6 +62,8 @@ class BarWidget:
 
     paint_icon = None  # необязательно: функция (painter, QRectF) — свой значок вместо символа icon
     paint_tile = None  # необязательно: (painter, QRectF, данные) — как виджет выглядит в доке (размер иконки)
+    dock_width = 1.0   # ширина в доке в размерах иконки (плеер — шире)
+    click = None       # необязательно: (QRectF плитки, QPointF клика, данные) -> True, если клик обработан
 
 
 # -- встроенные -----------------------------------------------------------------------------------
@@ -756,7 +758,147 @@ class CalibrateDialog(QDialog):
         return self.five.value(), five.timestamp(), self.week.value(), week.timestamp()
 
 
-BUILTIN = [SystemWidget, NetworkWidget, ClaudeWidget]
+GLYPH_MUSIC, GLYPH_PREV, GLYPH_NEXT = "\ue8d6", "\ue892", "\ue893"
+GLYPH_PLAY, GLYPH_PAUSE = "\ue768", "\ue769"
+
+
+class MediaWidget(BarWidget):
+    """Что сейчас играет (Spotify, YouTube в браузере, …): в доке — широкая плитка с обложкой, названием
+    и кнопками «назад / пауза / вперёд», на панели — название трека."""
+    id = "media"
+    name = "Плеер — что сейчас играет"
+    icon = GLYPH_MUSIC
+    interval = 1.0
+    dock_width = 3.6
+
+    def __init__(self):
+        from .media import media_core
+        self.core = media_core()
+        self.covers = {}  # ключ трека -> QImage обложки (рисуем в потоке интерфейса)
+
+    def update(self, detailed):
+        return dict(sessions=self.core.sessions(), available=self.core.available)
+
+    @staticmethod
+    def current(d):
+        """Играющая сессия, иначе первая; None — ничего нет."""
+        ss = (d or {}).get("sessions") or []
+        return next((s for s in ss if s["playing"]), ss[0] if ss else None)
+
+    def control(self, cur, action):
+        if cur is None:
+            return
+        if action == "toggle":
+            cur["playing"] = not cur["playing"]  # сразу показать новое состояние, пока Windows отвечает
+        self.core.submit(self.core.control(cur["id"], action))
+
+    def text(self, d):
+        cur = self.current(d)
+        if cur is None:
+            return "Ничего не играет"
+        line = cur["title"] + (f" — {cur['artist']}" if cur["artist"] else "")
+        return line if len(line) <= 42 else line[:41] + "…"
+
+    def panel(self, d):
+        cur = self.current(d)
+        if cur is None:
+            text = "Сейчас ни одна программа не воспроизводит звук" if (d or {}).get("available") \
+                else "Нужны пакеты winrt — без них плеер недоступен"
+            return [("title", "Плеер"), ("text", text)]
+        return [("title", cur["title"] or "Без названия"), ("text", cur["artist"] or ""),
+                ("sep",),
+                ("button", "Пауза" if cur["playing"] else "Играть", lambda: self.control(cur, "toggle")),
+                ("button", "Следующий трек", lambda: self.control(cur, "next")),
+                ("button", "Предыдущий трек", lambda: self.control(cur, "prev"))]
+
+    # -- плитка в доке
+    def cover(self, cur):
+        if cur is None or not cur.get("cover"):
+            return None
+        key = (cur["app"], cur["title"], cur["artist"], len(cur["cover"]))
+        img = self.covers.get(key)
+        if img is None:
+            from .flyouts import trim_cover
+            img = trim_cover(QImage.fromData(cur["cover"]))
+            if len(self.covers) > 16:
+                self.covers.clear()
+            self.covers[key] = img
+        return None if img.isNull() else img
+
+    @staticmethod
+    def parts(rect):
+        """Где что в плитке: (обложка, текст, [(кнопка, действие)]). Узкая плитка — только обложка и пауза."""
+        h, w = rect.height(), rect.width()
+        pad = min(h, w) * 0.1
+        side = min(h, w) - 2 * pad
+        art = QRectF(rect.left() + pad, rect.top() + pad, side, side)
+        if w < h * 1.6:
+            c = art.center()
+            return art, None, [(QRectF(c.x() - side * 0.25, c.y() - side * 0.25, side * 0.5, side * 0.5), "toggle")]
+        x0 = art.right() + pad * 1.3
+        text = QRectF(x0, rect.top() + pad * 0.9, rect.right() - pad - x0, h * 0.42)
+        bw = (rect.right() - pad - x0) / 3
+        by, bh = rect.top() + h * 0.56, h * 0.34
+        buttons = [(QRectF(x0 + k * bw, by, bw, bh), a) for k, a in enumerate(("prev", "toggle", "next"))]
+        return art, text, buttons
+
+    def paint_tile(self, p, rect, d):
+        cur = self.current(d)
+        tile_base(p, rect)
+        art, text, buttons = self.parts(rect)
+        img = self.cover(cur)
+        ap = rounded_path(art, art.width() * 0.16)
+        if img is not None:
+            p.save()
+            p.setClipPath(ap)
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            s = min(img.width(), img.height())
+            p.drawImage(art, img, QRectF((img.width() - s) / 2, (img.height() - s) / 2, s, s))
+            p.restore()
+        else:
+            p.fillPath(ap, QColor(255, 255, 255, 22))
+            f = QFont("Segoe MDL2 Assets")
+            f.setPixelSize(max(6, int(art.height() * 0.4)))
+            p.setFont(f)
+            p.setPen(QColor(255, 255, 255, 150))
+            p.drawText(art, Qt.AlignCenter, GLYPH_MUSIC)
+        playing = cur is not None and cur["playing"]
+        if text is not None:
+            h = rect.height()
+            f = QFont("Segoe UI Semibold")
+            f.setPixelSize(max(6, int(h * 0.19)))
+            p.setFont(f)
+            p.setPen(QColor(245, 245, 248))
+            title = (cur["title"] or "Без названия") if cur else "Ничего не играет"
+            p.drawText(QRectF(text.left(), text.top(), text.width(), text.height() * 0.55), Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetricsF(f).elidedText(title, Qt.ElideRight, text.width()))
+            f2 = QFont("Segoe UI")
+            f2.setPixelSize(max(6, int(h * 0.15)))
+            p.setFont(f2)
+            p.setPen(QColor(255, 255, 255, 150))
+            p.drawText(QRectF(text.left(), text.top() + text.height() * 0.52, text.width(), text.height() * 0.48),
+                       Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetricsF(f2).elidedText(cur["artist"] if cur else "", Qt.ElideRight, text.width()))
+        gf = QFont("Segoe MDL2 Assets")
+        for r, action in buttons:
+            glyph = {"prev": GLYPH_PREV, "next": GLYPH_NEXT}.get(action, GLYPH_PAUSE if playing else GLYPH_PLAY)
+            if text is None:  # узкая плитка: кнопка поверх обложки
+                p.fillPath(rounded_path(r, r.width() / 2), QColor(0, 0, 0, 120))
+            gf.setPixelSize(max(6, int(min(r.height(), r.width()) * (0.55 if text is None else 0.62))))
+            p.setFont(gf)
+            p.setPen(QColor(245, 245, 248) if cur is not None else QColor(255, 255, 255, 80))
+            p.drawText(r, Qt.AlignCenter, glyph)
+
+    def click(self, rect, pos, d):
+        cur = self.current(d)
+        for r, action in self.parts(rect)[2]:
+            if r.adjusted(-2, -2, 2, 2).contains(pos):
+                self.control(cur, action)
+                return True
+        return False
+
+
+BUILTIN = [SystemWidget, NetworkWidget, ClaudeWidget, MediaWidget]
 
 
 # -- свои виджеты из папки ------------------------------------------------------------------------
@@ -903,6 +1045,11 @@ class WidgetHost(QObject):
                     traceback.print_exc()
                     return None
             return inst
+
+    def poke(self, wid):
+        """Обновить виджет как можно скорее (нажали кнопку — показать новое состояние)."""
+        self.due.pop(wid, None)
+        self.wake.set()
 
     def set_detailed(self, wid, on):
         (self.detailed.add if on else self.detailed.discard)(wid)
