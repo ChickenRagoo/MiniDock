@@ -154,6 +154,27 @@ class CornerMask(QWidget):
             self.overlay(p)
 
 
+def close_button_rect(thumb):
+    """Кружок «закрыть» в правом верхнем углу миниатюры (док, Alt+Tab)."""
+    return QRectF(thumb.right() - 24, thumb.top() + 6, 18, 18)
+
+
+_font_x = None
+
+
+def paint_close_button(p, r, hot):
+    """Кружок с крестиком: красный под курсором, иначе тёмный полупрозрачный."""
+    global _font_x
+    if _font_x is None:
+        _font_x = QFont("Segoe MDL2 Assets", 7)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(232, 17, 35) if hot else QColor(20, 20, 24, 200))
+    p.drawEllipse(r)
+    p.setFont(_font_x)
+    p.setPen(QColor(255, 255, 255))
+    p.drawText(r, Qt.AlignCenter, "")
+
+
 class LiveThumbs:
     """Живые скруглённые миниатюры поверх панели: хост DWM + слой скругления."""
 
@@ -241,7 +262,7 @@ class WindowPreview(QWidget):
         return x - self.GAP + self.PAD, self.PAD + h + self.PAD  # только картинки, без подписей
 
     def close_rect(self, thumb):
-        return QRectF(thumb.right() - 24, thumb.top() + 6, 18, 18)
+        return close_button_rect(thumb)
 
     # -- show / hide (вызывается доком)
     def request(self, item, anchor):
@@ -342,13 +363,7 @@ class WindowPreview(QWidget):
         if self.hover is None or self.hover[0] >= len(self.tiles):
             return
         i, part = self.hover
-        r = self.close_rect(self.tiles[i][1])
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(232, 17, 35) if part == "close" else QColor(20, 20, 24, 200))
-        p.drawEllipse(r)
-        p.setFont(self.font_x)
-        p.setPen(QColor(255, 255, 255))
-        p.drawText(r, Qt.AlignCenter, "")
+        paint_close_button(p, self.close_rect(self.tiles[i][1]), part == "close")
 
     def set_hover(self, hover):
         if hover != self.hover:

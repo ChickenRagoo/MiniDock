@@ -38,7 +38,7 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--reveal": "MiniDock_Reveal", "--test-preview": "MiniDock_TestPreview",
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
-            "--test-volume": "MiniDock_TestVolume"}
+            "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -341,6 +341,40 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-close":
+            # Alt+Tab: навести крестик на окно Блокнота и закрыть его, как кликом (другие окна не трогаем)
+            sw = self.switcher
+            sw.begin(1)
+
+            def notepad():
+                tiles = sw.tiles()
+                return next((k for k, (h, _) in enumerate(tiles) if win32gui.GetClassName(h) == "Notepad"), None)
+
+            def aim():
+                if sw is self.win_switcher:
+                    k = next((k for k, (h, _) in enumerate(sw.wins) if win32gui.GetClassName(h) == "Notepad"), None)
+                    if k is not None:
+                        sw.hover = sw.close_hot = k
+                        sw.changed()
+                    return
+                k = next((k for k, a in enumerate(sw.apps)
+                          if any(win32gui.GetClassName(h) == "Notepad" for h in a["hwnds"])), None)
+                if k is not None:
+                    sw.hover = k
+                    sw.update_thumbs()
+                    k = notepad()
+                    sw.hover_win, sw.close_hot = k, ("win", k)
+                    sw.selection_changed()
+
+            def fire():
+                if sw is self.win_switcher:
+                    if sw.close_hot is not None:
+                        sw.quit_selected(sw.close_hot)
+                elif sw.close_hot is not None:
+                    sw.close_window(sw.tiles()[sw.close_hot[1]][0])
+            QTimer.singleShot(700, aim)
+            QTimer.singleShot(1500, fire)
+            QTimer.singleShot(3500, sw.cancel)
         elif flag == "--test-restore":
             # развернуть последнее свёрнутое окно так же, как по клику на иконку в доке
             for hwnd in reversed(list(self.animator.min_imgs)):

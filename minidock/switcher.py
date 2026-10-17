@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QPainter, QPain
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .dock import Item
-from .previews import THUMB_RADIUS, LiveThumbs, row_layout, window_title
+from .previews import THUMB_RADIUS, LiveThumbs, close_button_rect, paint_close_button, row_layout, window_title
 from .ui import TOP_FLAGS, animate, fade_in, lerp, make_glass, precise_timer, prepare_glass, rounded_path, smooth
 from .winapi import (KBDLLHOOKSTRUCT, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RMENU,
                      VK_RWIN, VK_SHIFT, VK_TAB, key_text, LowLevelKeyboardProc, app_name_for, app_windows, force_foreground,
@@ -220,6 +220,8 @@ class Switcher(QWidget):
         self.win_mode = False  # стрелки выбирают окна, а не приложения
         self.hover = None      # приложение под мышью: его окна показаны, но выбор (для Alt) не меняется
         self.hover_win = None  # миниатюра под мышью
+        self.close_hot = None  # крестик под мышью: ("win", номер миниатюры) | ("app", номер приложения)
+        self.icon_hover = None  # иконка под мышью (у неё появляется крестик «закрыть приложение»)
         self.hl = None       # анимированная позиция подсветки (QPointF)
         self.active = False
         self.icons = {}
@@ -375,12 +377,12 @@ class Switcher(QWidget):
             self.thumbs.hide()
             return
         self.update()
-        self.thumbs.show(self, self.tiles())
+        self.thumbs.show(self, self.tiles(), self.paint_overlay)
 
     def selection_changed(self):
         """Сменилось выбранное окно: подсветка под миниатюрами — уголкам нужен новый фон."""
         self.update()
-        self.thumbs.refresh_mask(self, self.tiles())
+        self.thumbs.refresh_mask(self, self.tiles(), self.paint_overlay)
 
     # -- control (вызывается из хука)
     def begin(self, direction):
@@ -390,7 +392,7 @@ class Switcher(QWidget):
         self.app.preview.close_preview()
         self.index = (1 if direction > 0 else -1) % len(self.apps) if len(self.apps) > 1 else 0
         self.win_index, self.win_mode = 0, False
-        self.hover = self.hover_win = None
+        self.hover = self.hover_win = self.icon_hover = self.close_hot = None
         self.hl = None       # подсветка сразу встаёт на выбранное
         self.active = True
         # короткое Alt+Tab переключает без вспышки окна
@@ -547,6 +549,8 @@ class Switcher(QWidget):
             if it.pix:
                 pix = it.pix_for(size * dpr)
                 p.drawPixmap(r, pix, QRectF(pix.rect()))
+        if self.icon_hover is not None and self.icon_hover < len(self.apps):
+            paint_close_button(p, self.app_close_rect(self.icon_hover), self.close_hot == ("app", self.icon_hover))
         a = self.apps[self.shown()]
         if self.cfg["switcher_titles"]:
             fm = QFontMetricsF(self.font_name)
@@ -597,24 +601,96 @@ class Switcher(QWidget):
                 return i
         return None
 
+    # -- крестики «закрыть»: на миниатюре под мышью — окно, на иконке под мышью — всё приложение
+    def app_close_rect(self, i):
+        r = self.icon_rect(i)
+        side = max(18.0, r.width() * 0.22)
+        return QRectF(r.left() - side * 0.25, r.top() - side * 0.25, side, side)
+
+    def close_at(self, pos):
+        tiles = self.tiles()
+        if self.hover_win is not None and self.hover_win < len(tiles)                 and close_button_rect(tiles[self.hover_win][1]).contains(pos):
+            return "win", self.hover_win
+        if self.icon_hover is not None and self.icon_hover < len(self.apps)                 and self.app_close_rect(self.icon_hover).contains(pos):
+            return "app", self.icon_hover
+        return None
+
+    def paint_overlay(self, p):
+        """Поверх миниатюр (в слое скругления): кружок «закрыть» у миниатюры под мышью."""
+        tiles = self.tiles()
+        if self.hover_win is not None and self.hover_win < len(tiles):
+            paint_close_button(p, close_button_rect(tiles[self.hover_win][1]), self.close_hot == ("win", self.hover_win))
+
+    def close_window(self, hwnd):
+        """Закрыть одно окно мышью: убираем его из списка сразу, размер переключателя не меняем."""
+        syscommand(hwnd, win32con.SC_CLOSE)
+        for k, a in enumerate(self.apps):
+            if hwnd in a["hwnds"]:
+                a["hwnds"].remove(hwnd)
+                if a["hwnds"]:
+                    a["row"] = row_layout(a["hwnds"], self.preview_height(), self.PREVIEW_GAP,
+                                          QApplication.primaryScreen().geometry().width() - 160)
+                    if k == self.index:
+                        self.win_index %= len(a["hwnds"])
+                else:
+                    self.drop_app(k)
+                break
+        self.hover_win = self.close_hot = None
+        self.update_thumbs()
+
+    def close_app(self, i):
+        for h in self.apps[i]["hwnds"]:
+            syscommand(h, win32con.SC_CLOSE)
+        self.drop_app(i)
+        self.hover_win = self.close_hot = None
+        self.update_thumbs()
+
+    def drop_app(self, i):
+        self.apps.pop(i)
+        if not self.apps:
+            self.finish()
+            return
+        if i < self.index:
+            self.index -= 1
+        self.index %= len(self.apps)
+        self.hover = self.icon_hover = None
+        self.win_index, self.win_mode = 0, False
+        self.hl = None
+
     def mouseMoveEvent(self, e):
         """Наведение только показывает окна приложения; выбор для отпускания Alt не меняется."""
-        if not self.cfg["switcher_hover"]:
-            return
-        w = self.window_at(e.position())
-        if w != self.hover_win:
-            self.hover_win = w
+        pos = e.position()
+        w = self.window_at(pos)
+        icon = self.index_at(pos) if w is None else None
+        changed = w != self.hover_win or icon != self.icon_hover
+        self.hover_win, self.icon_hover = w, icon
+        hot = self.close_at(pos)
+        if changed or hot != self.close_hot:
+            self.close_hot = hot
             self.selection_changed()
-        if w is not None:
+        if w is not None or not self.cfg["switcher_hover"]:
             return
-        i = self.index_at(e.position())
-        if i is not None and i != self.shown():
-            self.hover = i
+        if icon is not None and icon != self.shown():
+            self.hover = icon
             self.update_thumbs()
 
+    def leaveEvent(self, e):
+        if self.hover_win is not None or self.icon_hover is not None:
+            self.hover_win = self.icon_hover = self.close_hot = None
+            self.selection_changed()
+
     def mouseReleaseEvent(self, e):
-        """Переключает только клик левой кнопкой — по миниатюре окна или по иконке приложения."""
+        """Переключает только клик левой кнопкой — по миниатюре окна или по иконке приложения;
+        клик по крестику закрывает окно или приложение, переключатель остаётся открытым."""
         if e.button() != Qt.LeftButton:
+            return
+        hot = self.close_at(e.position())
+        if hot is not None:
+            kind, k = hot
+            if kind == "win":
+                self.close_window(self.tiles()[k][0])
+            else:
+                self.close_app(k)
             return
         w = self.window_at(e.position())
         i = self.index_at(e.position())
@@ -646,6 +722,7 @@ class WinSwitcher(QWidget):
         self.layout_rows = []     # [(индексы окон, ширины, высота)]
         self.index = 0
         self.hover = None
+        self.close_hot = self._drawn_hover = None  # крестик под мышью / что уже нарисовано
         self.active = False
         self.pad = 16.0
         self.font_title = QFont("Segoe UI", 9)
@@ -716,6 +793,7 @@ class WinSwitcher(QWidget):
         self.app.preview.close_preview()
         self.index = (1 if direction > 0 else -1) % len(self.wins) if len(self.wins) > 1 else 0
         self.hover = None
+        self.close_hot = self._drawn_hover = None  # крестик под мышью / что уже нарисовано
         self.active = True
         QTimer.singleShot(int(self.cfg["switcher_delay"]), self.show_if_active)
 
@@ -788,16 +866,20 @@ class WinSwitcher(QWidget):
         else:
             force_foreground(hwnd)
 
-    def quit_selected(self):
-        """Q: закрыть выбранное окно."""
+    def quit_selected(self, i=None):
+        """Q: закрыть выбранное окно (или i-е — крестик на миниатюре)."""
         if not self.active or not self.wins:
             return
-        hwnd, _ = self.wins.pop(self.index)
+        i = self.index if i is None else i
+        hwnd, _ = self.wins.pop(i)
         syscommand(hwnd, win32con.SC_CLOSE)
         if not self.wins:
             self.finish()
             return
+        if i < self.index:
+            self.index -= 1
         self.index %= len(self.wins)
+        self.hover = self.close_hot = None
         self.thumbs.hide()
         self.place()
         self.thumbs.show(self, self.tiles(), self.paint_overlay)
@@ -845,23 +927,43 @@ class WinSwitcher(QWidget):
             r = QRectF(tile.center().x() - self.ICON / 2, tile.bottom() - self.ICON / 2, self.ICON, self.ICON)
             pix = it.pix_for(self.ICON * dpr)
             p.drawPixmap(r, pix, QRectF(pix.rect()))
+        tiles = self.tiles()
+        if self.hover is not None and self.hover < len(tiles):  # крестик «закрыть» у миниатюры под мышью
+            paint_close_button(p, close_button_rect(tiles[self.hover][1]), self.close_hot == self.hover)
 
-    # -- мышь: наведение подсвечивает, клик — переключает
+    # -- мышь: наведение подсвечивает, клик — переключает, крестик — закрывает окно
     def tile_at(self, pos):
         for i, (h, tile) in enumerate(self.tiles()):
             if tile.adjusted(-7, -7, 7, self.LABEL).contains(pos):
                 return i
         return None
 
+    def close_at(self, pos):
+        tiles = self.tiles()
+        if self.hover is not None and self.hover < len(tiles) and close_button_rect(tiles[self.hover][1]).contains(pos):
+            return self.hover
+        return None
+
     def mouseMoveEvent(self, e):
         i = self.tile_at(e.position())
         if i != self.hover:
             self.hover = i
-            self.update()
+        hot = self.close_at(e.position())
+        if hot != self.close_hot or self.hover != self._drawn_hover:
+            self.close_hot, self._drawn_hover = hot, self.hover
+            self.changed()
+
+    def leaveEvent(self, e):
+        if self.hover is not None:
+            self.hover = self.close_hot = self._drawn_hover = None
+            self.changed()
 
     def mouseReleaseEvent(self, e):
         i = self.tile_at(e.position())
         if e.button() != Qt.LeftButton or i is None:
+            return
+        if self.close_at(e.position()) == i:
+            self.quit_selected(i)
             return
         self.app.keys.switching = False
         self.commit(self.wins[i][0])
