@@ -22,8 +22,8 @@ if "--live-helper" in sys.argv:
     helper_main(int(sys.argv[sys.argv.index("--live-helper") + 1]))
     sys.exit(0)
 
-if getattr(sys, "frozen", False) and "--" not in " ".join(sys.argv[1:]):
-    # у собранного MiniDock.exe нет консоли — ошибки пишем в файл, чтобы их можно было прислать
+if (getattr(sys, "frozen", False) or sys.stderr is None) and "--" not in " ".join(sys.argv[1:]):
+    # без консоли (MiniDock.exe, pythonw) — ошибки пишем в файл, чтобы их можно было прислать
     _log_dir = os.path.join(os.environ.get("APPDATA", "."), "MiniDock")
     os.makedirs(_log_dir, exist_ok=True)
     sys.stderr = sys.stdout = open(os.path.join(_log_dir, "error.log"), "a", encoding="utf-8", buffering=1)
