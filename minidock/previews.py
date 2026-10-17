@@ -276,7 +276,7 @@ class WindowPreview(QWidget):
             self.hide()
         self.item, self.hwnds, self.hover = item, hwnds, None
         w, h = self.layout_tiles()
-        scr = QApplication.primaryScreen().geometry()
+        scr = (QApplication.screenAt(anchor.center().toPoint()) or QApplication.primaryScreen()).geometry()
         side = self.cfg["position"]
         if side == "bottom":
             x, y = anchor.center().x() - w / 2, anchor.top() - h - 12
@@ -375,7 +375,7 @@ class WindowPreview(QWidget):
         item = self.item
         self.close_preview()
         if win32gui.IsIconic(hwnd):
-            self.app.animator.restore(hwnd, self.app.dock.icon_screen_rect(item))
+            self.app.animator.restore(hwnd, self.app.dock_of(item).icon_screen_rect(item))
         else:
             force_foreground(hwnd)
 

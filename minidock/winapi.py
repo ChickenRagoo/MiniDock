@@ -399,6 +399,39 @@ def foreground_is_fullscreen():
     return rect[0] <= mon[0] and rect[1] <= mon[1] and rect[2] >= mon[2] and rect[3] >= mon[3]
 
 
+def window_monitor(hwnd):
+    """(дескриптор монитора, его прямоугольник в физических пикселях) для окна."""
+    mon = win32api.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+    return int(mon), tuple(win32api.GetMonitorInfo(mon)["Monitor"])
+
+
+def point_monitor(x, y):
+    return int(win32api.MonitorFromPoint((int(x), int(y)), 2))
+
+
+def fullscreen_monitor():
+    """Монитор, на котором сейчас полноэкранная игра/видео (окно без заголовка на весь экран), или None."""
+    fg = win32gui.GetForegroundWindow()
+    if not fg or win32gui.GetClassName(fg) in IGNORED_CLASSES:
+        return None
+    _, pid = win32process.GetWindowThreadProcessId(fg)
+    if pid == os.getpid():
+        return None
+    try:
+        if user32.IsZoomed(fg):
+            return None
+        if win32gui.GetWindowLong(fg, win32con.GWL_STYLE) & win32con.WS_CAPTION == win32con.WS_CAPTION:
+            return None
+        mon = win32api.MonitorFromWindow(fg)
+        m = win32api.GetMonitorInfo(mon)["Monitor"]
+        rect = win32gui.GetWindowRect(fg)
+    except Exception:
+        return None
+    if rect[0] <= m[0] and rect[1] <= m[1] and rect[2] >= m[2] and rect[3] >= m[3]:
+        return int(mon)
+    return None
+
+
 def primary_monitor_rect():
     return win32api.GetMonitorInfo(win32api.MonitorFromPoint((0, 0), 1))["Monitor"]
 
@@ -710,7 +743,7 @@ def appbar_state(hwnd, new_state=None):
     shell32.SHAppBarMessage(10, ctypes.byref(abd))  # ABM_SETSTATE
 
 
-def appbar_reserve(hwnd, rect):
+def appbar_reserve(hwnd, rect, edge=1):
     """Зарезервировать полосу rect (l, t, r, b, физические пиксели) у верхнего края монитора:
     развёрнутые окна на этом мониторе не будут заходить под панель."""
     abd = APPBARDATA()
@@ -718,10 +751,18 @@ def appbar_reserve(hwnd, rect):
     abd.hWnd = hwnd
     abd.uCallbackMessage = 0x0400 + 77
     shell32.SHAppBarMessage(0, ctypes.byref(abd))  # ABM_NEW (повторная регистрация безвредна)
-    abd.uEdge = 1  # ABE_TOP
+    abd.uEdge = edge  # 0 — слева, 1 — сверху, 2 — справа, 3 — снизу
     abd.rc = wintypes.RECT(*rect)
     shell32.SHAppBarMessage(2, ctypes.byref(abd))  # ABM_QUERYPOS
-    abd.rc.bottom = abd.rc.top + (rect[3] - rect[1])
+    w, h = rect[2] - rect[0], rect[3] - rect[1]
+    if edge == 0:
+        abd.rc.right = abd.rc.left + w
+    elif edge == 2:
+        abd.rc.left = abd.rc.right - w
+    elif edge == 3:
+        abd.rc.top = abd.rc.bottom - h
+    else:
+        abd.rc.bottom = abd.rc.top + h
     shell32.SHAppBarMessage(3, ctypes.byref(abd))  # ABM_SETPOS
 
 

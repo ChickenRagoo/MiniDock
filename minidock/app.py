@@ -21,11 +21,12 @@ from .menubar import MenuBar
 from .previews import WindowPreview
 from .spotlight import Spotlight
 from .switcher import KeyHook, Switcher
+from .elevation import open_security
 from .updater import Updater
 from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
-                     force_foreground, foreground_is_fullscreen, get_work_area, primary_monitor_rect, set_window_shadows,
-                     set_work_area, taskbar_windows, user32, window_shadows)
+                     force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, set_window_shadows,
+                     set_work_area, taskbar_windows, user32, window_monitor, window_shadows)
 
 QUIT_EVENT = "MiniDock_Quit"
 # команды уже запущенному доку: MiniDock.pyw --launchpad / --settings (удобно повесить на ярлык)
@@ -57,6 +58,7 @@ class App:
         self.dock = Dock(self)
         self.bar = MenuBar(self)
         self.extra_bars = {}  # имя монитора -> панель на дополнительном мониторе
+        self.extra_docks = {}  # имя монитора -> док на дополнительном мониторе
         self.launchpad = Launchpad(self)
         self.spotlight = Spotlight(self)
         self.switcher = Switcher(self)
@@ -83,7 +85,8 @@ class App:
         self.poll_timer.start()
         # команды (--quit, --launchpad, …) ждёт отдельный поток — в простое он спит и не тратит ничего
         events = {QUIT_EVENT: quit_event}
-        events.update({flag: win32event.CreateEvent(None, False, False, name) for flag, name in COMMANDS.items()})
+        sa = open_security()
+        events.update({flag: win32event.CreateEvent(sa, False, False, name) for flag, name in COMMANDS.items()})
         self.waiter = EventWaiter(events)
         self.waiter.fired.connect(self.on_command)
         self.poll()
@@ -141,6 +144,7 @@ class App:
             self.bar.hide()
         self.place_extra_bars()
         self.dock.place()
+        self.place_extra_docks()
         if not self.fullscreen:
             self.dock.show()
         self.dock.apply_glass()
@@ -150,6 +154,44 @@ class App:
 
     def bars(self):
         return [self.bar] + list(self.extra_bars.values())
+
+    def docks(self):
+        return [self.dock] + list(self.extra_docks.values())
+
+    def dock_of(self, item):
+        """Док, которому принадлежит иконка (у каждого дока свои)."""
+        for d in self.docks():
+            if item in d.items() or item in d.all_apps():
+                return d
+        return self.dock
+
+    def pinned_changed(self, source):
+        for d in self.docks():
+            if d is not source:
+                d.reload_pinned()
+        if source is not self.dock or self.extra_docks:
+            QTimer.singleShot(0, self.poll)
+
+    def place_extra_docks(self):
+        """Док на дополнительных мониторах (настройка «Док на всех мониторах»)."""
+        primary = QApplication.primaryScreen()
+        want = {}
+        if self.cfg["dock_all_screens"]:
+            want = {s.name(): s for s in QApplication.screens() if s is not primary}
+        for name in list(self.extra_docks):
+            d = self.extra_docks[name]
+            if name not in want or d.home not in QApplication.screens():
+                d.release()
+                d.hide()
+                d.deleteLater()
+                del self.extra_docks[name]
+        for name, scr in want.items():
+            d = self.extra_docks.get(name)
+            if d is None:
+                d = self.extra_docks[name] = Dock(self, scr)
+            d.place()
+            d.show()
+            d.apply_glass()
 
     def place_extra_bars(self):
         """Верхняя панель на дополнительных мониторах (настройка «На всех мониторах»)."""
@@ -207,8 +249,8 @@ class App:
             set_work_area(self.want_area)
 
     def cleanup(self):
-        for bar in self.extra_bars.values():  # вернуть место сверху на дополнительных мониторах
-            bar.release()
+        for w in list(self.extra_bars.values()) + list(self.extra_docks.values()):  # вернуть зарезервированное место
+            w.release()
         self.animator.cleanup()
         self.keys.unhook()
         if self.taskbar.hidden or self.cfg.get("taskbar_orig_state") is not None:
@@ -246,7 +288,7 @@ class App:
         elif flag == "--show":
             # MiniDock запустили ещё раз: показать док и панель (даже если считали, что идёт игра) и ответить
             self.fullscreen = False
-            self.animator.gpu.set_enabled(True)
+            self.animator.set_enabled(True)
             self.apply_layout()
             self.dock.reveal(3.0)
             signal_running(SHOW_ACK)
@@ -318,14 +360,23 @@ class App:
         full = foreground_is_fullscreen() and not self.launchpad.isVisible()
         if full != self.fullscreen:
             self.fullscreen = full
-            self.animator.gpu.set_enabled(not full)
+            self.animator.set_enabled(not full)
             for w in (self.dock, self.bar):
                 if full:
                     w.hide()
                 elif w is self.dock or self.cfg["menubar"]:
                     w.show()
+        # на дополнительных мониторах — то же самое, но для игры на их собственном экране
+        game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None
+        for w in list(self.extra_docks.values()) + list(self.extra_bars.values()):
+            hide = game is not None and window_monitor(int(w.winId()))[0] == game
+            if hide and w.isVisible():
+                w.hide()
+            elif not hide and not w.isVisible():
+                w.show()
         wins = app_windows()
-        self.dock.poll_windows(wins)
+        for d in self.docks():
+            d.poll_windows(wins)
         self.animator.remember(wins)
 
     # -- window events
@@ -371,7 +422,7 @@ class App:
         else:
             nxt = hwnds[0]
         if win32gui.IsIconic(nxt):
-            self.animator.restore(nxt, self.dock.icon_screen_rect(item))
+            self.animator.restore(nxt, self.dock_of(item).icon_screen_rect(item))
         else:
             force_foreground(nxt)
 
@@ -406,7 +457,7 @@ def signal_running(name):
 def take_over(mutex):
     """MiniDock уже запущен. Просим его показаться; если он завис и не отвечает — закрываем его.
     True — старого экземпляра больше нет, запускаемся сами."""
-    ack = win32event.CreateEvent(None, False, False, SHOW_ACK)
+    ack = win32event.CreateEvent(open_security(), False, False, SHOW_ACK)
     signal_running(COMMANDS["--show"])
     if win32event.WaitForSingleObject(ack, 4000) == win32event.WAIT_OBJECT_0:
         return False  # живой — он сам показался
@@ -435,10 +486,15 @@ def main(script):
         if flag in sys.argv:
             signal_running(name)
             return
-    mutex = win32event.CreateMutex(None, False, "MiniDock_SingleInstance")
-    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS and not take_over(mutex):
+    try:
+        mutex = win32event.CreateMutex(open_security(), False, "MiniDock_SingleInstance")
+        exists = win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS
+    except Exception:  # «занято» создал экземпляр с другими правами — значит, MiniDock уже запущен
+        signal_running(COMMANDS["--show"])
         return
-    quit_event = win32event.CreateEvent(None, True, False, QUIT_EVENT)
+    if exists and not take_over(mutex):
+        return
+    quit_event = win32event.CreateEvent(open_security(), True, False, QUIT_EVENT)
     win32event.ResetEvent(quit_event)
     qapp = QApplication(sys.argv)
     qapp.setQuitOnLastWindowClosed(False)

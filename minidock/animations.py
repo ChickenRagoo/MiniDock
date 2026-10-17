@@ -18,7 +18,8 @@ from PySide6.QtWidgets import QApplication, QWidget
 from .gpu_genie import GpuGenie
 from .ui import TOP_FLAGS, clamp, ease, lerp, precise_timer
 from .winapi import (dwmapi, force_foreground, grab_screen, is_app_window, make_invisible, make_visible, native_overlay_window,
-                     primary_monitor_rect, restored_frame, snapshot, user32, window_exe, window_geometry)
+                     point_monitor, primary_monitor_rect, restored_frame, snapshot, user32, window_exe,
+                     window_geometry, window_monitor)
 
 DEBUG = bool(os.environ.get("MINIDOCK_DEBUG"))
 SNAP_LIMIT = 6  # снимков окон для анимации закрытия (каждый до ~4 МБ)
@@ -279,6 +280,7 @@ class WindowAnimator:
     def __init__(self, app):
         self.app = app
         self.gpu = GpuGenie()          # основной: снимок окна на сетке, без «лесенок»
+        self.gpus = [self.gpu]         # по слою на каждый монитор (дополнительные создаются при надобности)
         self.genie = GenieOverlay()    # запасной: живые DWM-миниатюры, если снимок не получился
         self.closer = CloseOverlay()
         self.hidden = {}      # hwnd -> исходный exstyle, пока окно невидимо ради анимации
@@ -346,16 +348,38 @@ class WindowAnimator:
         if r - 220 <= x <= r and t <= y <= t + 60:
             self.take_snapshot(root, max_w=4096)
 
+    def gpu_for(self, rect):
+        """Слой анимаций монитора, на котором центр rect (физические пиксели)."""
+        mon = point_monitor((rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2)
+        for g in self.gpus:
+            if g.physical() and g.mon == mon:
+                return g
+        for scr in QApplication.screens():
+            if scr is QApplication.primaryScreen() or any(g.screen is scr for g in self.gpus):
+                continue
+            g = GpuGenie(scr)
+            self.gpus.append(g)
+            if g.physical() and g.mon == mon:
+                return g
+        return self.gpu
+
+    def gpu_with(self, hwnd):
+        return next((g for g in self.gpus if g.busy_with(hwnd)), None)
+
+    def set_enabled(self, on):
+        for g in self.gpus:
+            g.set_enabled(on)
+
     def busy(self, hwnd):
-        return self.gpu.busy_with(hwnd) or self.genie.busy_with(hwnd)
+        return self.gpu_with(hwnd) is not None or self.genie.busy_with(hwnd)
 
     def play(self, hwnd, img, frame, icon, insets, reverse, duration, mode, on_done=None):
         """Сначала GPU-«джинн» по снимку, если снимка нет — DWM-миниатюры."""
         if self.busy(hwnd):
             return False
         dpr = QApplication.primaryScreen().devicePixelRatio()
-        if img is not None and self.gpu.play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode,
-                                             on_done, dpr):
+        if img is not None and self.gpu_for(icon).play(hwnd, img, frame, icon, reverse, duration, self.flow(), mode,
+                                                       on_done, dpr):
             return True
         if DEBUG:
             print(f"fallback to DWM: img={'none' if img is None else img.size()} reverse={reverse}", flush=True)
@@ -380,8 +404,17 @@ class WindowAnimator:
         for hwnd in list(self.hidden):
             self.unhide(hwnd)
 
+    def dock_for(self, hwnd):
+        """Док на мониторе окна (если там есть свой док), иначе основной."""
+        try:
+            mon = window_monitor(hwnd)[0]
+        except Exception:
+            return self.app.dock
+        return next((d for d in self.app.docks() if d.monitor() == mon), self.app.dock)
+
     def icon_for(self, hwnd):
-        return self.app.dock.icon_screen_rect(self.app.dock.item_for_hwnd(hwnd, window_exe(hwnd)))
+        dock = self.dock_for(hwnd)
+        return dock.icon_screen_rect(dock.item_for_hwnd(hwnd, window_exe(hwnd)))
 
     # -- minimize
     def on_minimize_start(self, hwnd):
@@ -393,11 +426,11 @@ class WindowAnimator:
         if not g:
             return
         self.geo[hwnd] = g
-        self.app.dock.reveal(1.0)
+        self.dock_for(hwnd).reveal(1.0)
         snap = snapshot(hwnd)  # если окно ещё на экране — свежий кадр
         img = snap[0] if snap else None
         if img is None:  # уже свёрнуто — берём кадр из DWM
-            img = self.genie.capture(hwnd, g[0], g[1], below=self.gpu.hwnd)
+            img = self.genie.capture(hwnd, g[0], g[1], below=self.gpu_for(self.icon_for(hwnd)).hwnd)
         if img is None:
             img = (self.snaps.get(hwnd) or (None,))[0]
         elif img.width() >= g[0][2] - g[0][0] - 2:  # полноразмерный кадр — с него потом и развернём
@@ -408,9 +441,9 @@ class WindowAnimator:
         if DEBUG:
             print(f"minimize: fresh={bool(snap)} image={img is not None}", flush=True)
         on_gpu = self.play(hwnd, img, g[0], self.icon_for(hwnd), g[1], reverse=False, duration=self.dur(0.5),
-                           mode=self.cfg["minimize_effect"]) and self.gpu.busy_with(hwnd)
+                           mode=self.cfg["minimize_effect"]) and self.gpu_with(hwnd)
         if on_gpu:
-            self.gpu.after_frames(2, self.genie.release_capture)  # снимок под анимацией больше не нужен
+            on_gpu.after_frames(2, self.genie.release_capture)  # снимок под анимацией больше не нужен
         else:
             self.genie.release_capture()
 
@@ -437,7 +470,7 @@ class WindowAnimator:
         if img is None or not g or not self.play(hwnd, img, g[0], icon_rect, g[1], reverse=True, duration=duration,
                                                  mode=mode, on_done=lambda: self.unhide(hwnd)):
             return False
-        if not self.gpu.busy_with(hwnd):
+        if not self.gpu_with(hwnd):
             return True
 
         def refresh():
@@ -447,7 +480,9 @@ class WindowAnimator:
             if DEBUG:
                 print(f"refresh: fresh={fresh} snap={bool(snap)}", flush=True)
             if snap:
-                self.gpu.update_image(hwnd, snap[0], fresh[0])
+                g = self.gpu_with(hwnd)
+                if g:
+                    g.update_image(hwnd, snap[0], fresh[0])
         QTimer.singleShot(50, refresh)
         return True
 
@@ -509,5 +544,6 @@ class WindowAnimator:
         dpr = QApplication.primaryScreen().devicePixelRatio()
         r = snap[1]
         frame = (round(r.left() * dpr), round(r.top() * dpr), round(r.right() * dpr), round(r.bottom() * dpr))
-        if not self.gpu.play(hwnd, snap[0], frame, frame, False, self.dur(0.24), self.flow(), "close", None, dpr):
+        if not self.gpu_for(frame).play(hwnd, snap[0], frame, frame, False, self.dur(0.24), self.flow(), "close",
+                                        None, dpr):
             self.closer.play(snap[0], snap[1], duration=self.dur(0.22))

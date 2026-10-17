@@ -426,6 +426,8 @@ class Launchpad(QWidget):
 
     def close_animated(self, then=None):
         if self.closing:
+            if then:  # уже закрывается (например, только что потерял фокус) — запуск программы не теряем
+                QTimer.singleShot(160, then)
             return
         self.closing = True
         self.capture_keys = False
@@ -919,10 +921,16 @@ class Launchpad(QWidget):
         try:
             if os.path.isfile(parse):
                 win32api.ShellExecute(0, "open", parse, None, os.path.dirname(parse), win32con.SW_SHOWNORMAL)
-            else:
-                os.startfile("shell:AppsFolder\\" + parse)
+                return
         except Exception:
             pass
+        try:  # запасной путь — как запускает сам «Пуск»: по ID приложения
+            os.startfile("shell:AppsFolder\\" + parse)
+        except Exception:
+            try:
+                os.startfile(parse)
+            except Exception:
+                pass
 
     def launch(self, i):
         items = self.current_list()

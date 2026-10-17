@@ -63,6 +63,7 @@ DEFAULT_CFG = {
     # верхняя панель
     "menubar": True,
     "bar_all_screens": False,     # верхняя панель и на дополнительных мониторах
+    "dock_all_screens": False,    # док и на дополнительных мониторах
     "bar_height": 30,
     "bar_opacity": 255,
     "bar_blur": False,

@@ -87,10 +87,8 @@ class FolderPopup(QWidget):
         self.title.setText(folder.name)
         self.hover = None
         # над иконкой папки (или рядом с ней, если док слева/справа)
-        x0, y0, x1, y1 = self.dock.icon_screen_rect(folder)
-        dpr = self.dock.devicePixelRatioF()
-        icon = QRectF(x0 / dpr, y0 / dpr, (x1 - x0) / dpr, (y1 - y0) / dpr)
-        scr = QApplication.primaryScreen().geometry()
+        icon = self.dock.icon_global_rect(folder)
+        scr = self.dock.screen().geometry()
         side = self.dock.side
         if side == "bottom":
             x, y = icon.center().x() - w / 2, icon.top() - h - 14

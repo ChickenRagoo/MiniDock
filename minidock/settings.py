@@ -4,9 +4,10 @@ import subprocess
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import (QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
                                QMessageBox, QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
+from . import elevation
 from .config import CFG_DIR, DEFAULT_CFG
 from .updater import PAGE
 from .version import __version__
@@ -256,15 +257,39 @@ class SettingsWindow(QWidget):
         b.clicked.connect(cb)
         return b
 
+    def set_admin(self, on, toggle):
+        """Включить/выключить запуск с правами администратора и перезапустить MiniDock в нужном режиме."""
+        ok = elevation.enable() if on else elevation.disable()
+        if not ok:  # отказались в окне Windows или не получилось — переключатель назад
+            toggle.blockSignals(True)
+            toggle.setChecked(not on)
+            toggle.blockSignals(False)
+            return
+        if on:
+            set_autostart(False, self.app.script)  # теперь запуском при входе занимается задание
+            elevation.restart_elevated()
+        else:
+            set_autostart(True, self.app.script)
+            elevation.restart_normal()
+        QApplication.quit()
+
     # -- pages
     def page_general(self):
         w, lay = self.page("Основные")
-        auto = Toggle(autostart_enabled())
+        admin_task = elevation.task_exists()
+        auto = Toggle(autostart_enabled() or admin_task)
+        auto.setEnabled(not admin_task)  # в режиме администратора MiniDock запускает задание Планировщика
         auto.toggled.connect(lambda v: set_autostart(v, self.app.script))
+        admin = Toggle(admin_task)
+        admin.toggled.connect(lambda v: self.set_admin(v, admin))
         self.group(lay, [
             self.toggle("replace_taskbar", "Заменить панель задач Windows",
                         "Док встаёт на место панели задач, она прячется. При выходе всё возвращается."),
             self.row("Запускать вместе с Windows", auto),
+            self.row("Работать с правами администратора", admin,
+                     "Нужно, чтобы Alt+Tab, Win и Alt+Space работали и поверх программ, запущенных от администратора "
+                     "(диспетчер задач, лаунчеры игр, античиты). Windows один раз спросит разрешение. "
+                     "Перетаскивать файлы из Проводника в док в этом режиме нельзя."),
         ])
         self.group(lay, [
             self.toggle("win_key_launchpad", "Клавиша Win открывает Launchpad",
@@ -289,6 +314,8 @@ class SettingsWindow(QWidget):
             self.slider("magnify", "Увеличение при наведении", 1.0, 2.5, scale=100, fmt="{:.2f}×"),
             self.slider("spacing", "Расстояние между иконками", 0, 0.5, scale=100, fmt="{:.2f}"),
             self.slider("margin", "Отступ от края экрана", 0, 40, fmt="{:.0f} px"),
+            self.toggle("dock_all_screens", "Док на всех мониторах",
+                        "Свой док на каждом мониторе: окна сворачиваются в док того экрана, где они открыты."),
         ])
         self.group(lay, [
             self.toggle("autohide", "Автоматически скрывать док",

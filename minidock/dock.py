@@ -19,7 +19,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from .folders import FolderPopup, folder_pixmap
 from .ui import GLASS, TOP_FLAGS, MacMenu, lerp_rect, make_glass, popup_menu, precise_timer, smooth
-from .winapi import exe_description, extract_icon, file_icon, resolve_lnk, syscommand
+from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, resolve_lnk, syscommand,
+                     window_monitor)
 
 
 class Item:
@@ -113,9 +114,11 @@ def launchpad_pixmap():
 
 
 class Dock(QWidget):
-    def __init__(self, app):
+    def __init__(self, app, screen=None):
         super().__init__(None, TOP_FLAGS)
         self.app = app
+        self.home = screen        # None — основной монитор, иначе дополнительный (настройка «Док на всех мониторах»)
+        self.reserved = False
         self.cfg = app.cfg
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -194,7 +197,7 @@ class Dock(QWidget):
         return self.bar_height() + self.margin + 2
 
     def place(self):
-        scr = QApplication.primaryScreen()
+        scr = self.home or QApplication.primaryScreen()
         g = scr.geometry()
         if self.side == "bottom":
             base = g if self.cfg["replace_taskbar"] else scr.availableGeometry()
@@ -206,8 +209,39 @@ class Dock(QWidget):
             x = g.x() if self.side == "left" else g.x() + g.width() - depth
             self.area = QRect(x, g.y() + top, depth, g.height() - top)
         self.setGeometry(self.fitted(self.area))
+        self.reserve()
         self.first_layout = True
         self.update()
+        self.wake()
+
+    def monitor(self):
+        return window_monitor(int(self.winId()))[0]
+
+    def reserve(self):
+        """На дополнительном мониторе место под док (без автоскрытия) резервирует сам док —
+        на основном это делает рабочая область."""
+        if self.home is None:
+            return
+        if self.cfg["autohide"]:
+            self.release()
+            return
+        _, (l, t, r, b) = window_monitor(int(self.winId()))
+        thick = round(self.reserve_thickness() * self.home.devicePixelRatio())
+        edge = {"bottom": 3, "left": 0, "right": 2}[self.side]
+        rect = {3: (l, b - thick, r, b), 0: (l, t, l + thick, b), 2: (r - thick, t, r, b)}[edge]
+        appbar_reserve(int(self.winId()), rect, edge)
+        self.reserved = True
+
+    def release(self):
+        if self.reserved:
+            appbar_release(int(self.winId()))
+            self.reserved = False
+
+    def reload_pinned(self):
+        """Закреплённые поменяли в доке на другом мониторе — перечитать."""
+        if self.folder_popup.isVisible():
+            self.folder_popup.close()
+        self.pinned = self.load_pinned(self.cfg["pinned"])
         self.wake()
 
     def span_needed(self):
@@ -352,9 +386,19 @@ class Dock(QWidget):
             r = QRectF(L / 2 - self.B / 2, self.margin + self.pad, self.B, self.B)
         w = self.to_win_rect(r)
         dpr = self.devicePixelRatioF()
+        wl, wt = win32gui.GetWindowRect(int(self.winId()))[:2]  # от настоящего положения окна — на любом мониторе
+        return (round(wl + w.left() * dpr), round(wt + w.top() * dpr), round(wl + w.right() * dpr),
+                round(wt + w.bottom() * dpr))
+
+    def icon_global_rect(self, item):
+        """Иконка в логических координатах экрана (для всплывающих окон Qt)."""
+        if item is not None and item.folder is not None:
+            item = item.folder
+        r = item.cur if item is not None and item.cur is not None else QRectF(self.length() / 2 - self.B / 2,
+                                                                                self.margin + self.pad, self.B, self.B)
+        w = self.to_win_rect(r.translated(0, self.hide_k * self.hide_distance()))
         tl = self.mapToGlobal(w.topLeft().toPoint())
-        return (round(tl.x() * dpr), round(tl.y() * dpr), round((tl.x() + w.width()) * dpr),
-                round((tl.y() + w.height()) * dpr))
+        return QRectF(tl.x(), tl.y(), w.width(), w.height())
 
     def reveal(self, seconds=1.2):
         self.reveal_until = time.monotonic() + seconds
@@ -660,7 +704,7 @@ class Dock(QWidget):
         if not (e.buttons() & Qt.LeftButton) or it is None or it.kind not in ("app", "running", "folder"):
             return
         if not self.dragging:
-            if (e.position() - self.press_pos).manhattanLength() < 6:
+            if (e.position() - self.press_pos).manhattanLength() < 12:  # дрогнувшая рука — ещё клик
                 return
             self.dragging = True
             if it.kind == "running":  # перетаскивание запущенного = закрепить
@@ -701,7 +745,8 @@ class Dock(QWidget):
                 uv = self.to_uv(e.position())
                 it.cur = QRectF(uv.x() - s / 2, uv.y() - s / 2, s, s)
                 self.save_pinned()
-        elif self.item_at(self.to_uv(e.position())) is it:
+        elif self.rect().contains(e.position().toPoint()):
+            # клик засчитываем по иконке, на которую нажали: от увеличения она могла съехать из-под курсора
             self.activate(it)
 
     def activate(self, it, new_window=False):
@@ -717,6 +762,9 @@ class Dock(QWidget):
             else:
                 self.folder_popup.open(it)
             return
+        # окна, которые на самом деле ещё есть (список обновляется раз в секунду — программа могла закрыться)
+        alive = [h for h in it.hwnds if win32gui.IsWindow(h) and (win32gui.IsWindowVisible(h) or win32gui.IsIconic(h))]
+        it.hwnds = alive
         if it.hwnds and not new_window and not (QApplication.keyboardModifiers() & Qt.ShiftModifier):
             self.app.focus_windows(it, it.hwnds)
             return
@@ -747,6 +795,7 @@ class Dock(QWidget):
         self.cfg["pinned"] = [{"folder": it.name, "items": [c.path for c in it.children]} if it.kind == "folder"
                               else it.path for it in self.pinned]
         self.app.save_soon()
+        self.app.pinned_changed(self)
         self.wake()  # иконки переставились — доанимировать
 
     # -- папки

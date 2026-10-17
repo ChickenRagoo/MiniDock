@@ -77,7 +77,19 @@ Filename: "{app}\{#MyAppExe}"; Description: "{cm:LaunchNow}"; Flags: nowait post
 ; автообновление: установщик запущен тихо с /UPDATE — после установки сразу запускаем новую версию
 Filename: "{app}\{#MyAppExe}"; Flags: nowait runasoriginaluser; Check: IsUpdate
 
+[UninstallRun]
+; режим «с правами администратора»: задание Планировщика удаляется с разрешения администратора
+Filename: "{sys}\schtasks.exe"; Parameters: "/Delete /TN ""MiniDock"" /F"; Flags: shellexec waituntilterminated runhidden; Verb: "runas"; Check: AdminTaskExists; RunOnceId: "DelTask"
+
 [Code]
+function AdminTaskExists: Boolean;
+var
+  Code: Integer;
+begin
+  Result := Exec(ExpandConstant('{sys}\schtasks.exe'), '/Query /TN "MiniDock"', '', SW_HIDE, ewWaitUntilTerminated, Code)
+    and (Code = 0);
+end;
+
 function IsUpdate: Boolean;
 begin
   Result := Pos('/UPDATE', UpperCase(GetCmdTail)) > 0;

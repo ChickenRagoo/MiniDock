@@ -13,6 +13,7 @@ from PySide6.QtQuick import (QQuickItem, QQuickWindow, QSGGeometry, QSGGeometryN
 from PySide6.QtWidgets import QApplication
 
 from .ui import clamp, ease, ease_out, lerp, precise_timer
+from .winapi import window_monitor
 
 ROWS = 160
 SLOTS = 4
@@ -133,7 +134,8 @@ class GenieItem(QQuickItem):
 
 
 class GpuGenie:
-    def __init__(self):
+    def __init__(self, screen=None):
+        self.screen = screen  # None — основной монитор
         self.anims = []
         self.win = QQuickWindow()
         fmt = QSurfaceFormat(self.win.format())
@@ -165,10 +167,19 @@ class GpuGenie:
         self.timer.start()
 
     def place(self):
-        g = QApplication.primaryScreen().geometry()
+        scr = self.screen or QApplication.primaryScreen()
+        g = scr.geometry()
+        self.win.setScreen(scr)
         self.win.setGeometry(g)
         self.item.setSize(self.win.size())
-        self.origin = (g.x(), g.y())
+        self.dpr = scr.devicePixelRatio()
+        self.mon = None  # монитор и начало окна в физических пикселях — узнаём, когда окно уже на экране
+
+    def physical(self):
+        if self.mon is None:
+            self.mon, rect = window_monitor(self.hwnd)
+            self.origin = rect[:2]
+        return self.origin
 
     def set_enabled(self, on):
         """Прячем окно в полноэкранных играх, чтобы не мешать их выводу."""
@@ -199,11 +210,11 @@ class GpuGenie:
         return True
 
     def _set_image(self, a, img, src, dst):
-        ox, oy = self.origin
-        dpr = a["dpr"]
+        ox, oy = self.physical()
+        dpr = a["dpr"] = self.dpr
 
         def logical(r):
-            return (r[0] / dpr - ox, r[1] / dpr - oy, r[2] / dpr - ox, r[3] / dpr - oy)
+            return ((r[0] - ox) / dpr, (r[1] - oy) / dpr, (r[2] - ox) / dpr, (r[3] - oy) / dpr)
 
         # Сглаживание краёв без MSAA (MSAA стоил ~160 МБ): у снимка прозрачная рамка в PAD пикселей,
         # сетка шире на столько же — линейная фильтрация текстуры сама смягчает наклонный край.

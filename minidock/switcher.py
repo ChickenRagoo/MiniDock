@@ -59,13 +59,28 @@ class KeyHook(QObject):
         self.hook = user32.SetWindowsHookExW(13, self._proc, kernel32.GetModuleHandleW(None), 0)  # WH_KEYBOARD_LL
         self.thread_id = kernel32.GetCurrentThreadId()
         started.set()
+        # Если программа на миг задумалась и не ответила вовремя, Windows молча снимает перехватчик — и Alt+Tab
+        # становится системным. Поэтому раз в 3 с ставим его заново (заодно он снова первый в очереди).
+        user32.SetTimer(None, 0, 3000, None)
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            if msg.message == 0x0113:  # WM_TIMER
+                self.rehook()
+                continue
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
         if self.hook:
             user32.UnhookWindowsHookEx(self.hook)
             self.hook = None
+
+    def rehook(self):
+        if self.switching or self.win_down:
+            return  # посреди Alt+Tab или нажатой Win не трогаем
+        new = user32.SetWindowsHookExW(13, self._proc, kernel32.GetModuleHandleW(None), 0)
+        if new:
+            old, self.hook = self.hook, new
+            if old:
+                user32.UnhookWindowsHookEx(old)
 
     def unhook(self):
         if self.thread_id:
@@ -434,9 +449,9 @@ class Switcher(QWidget):
         self.finish()
         if win32gui.IsIconic(hwnd) and self.cfg["switcher_genie"]:
             # как при клике по доку: окно «джинном» вытекает из иконки программы в доке
-            item = target["item"]
-            icon = self.app.dock.icon_screen_rect(item if item in self.app.dock.items() else None)
-            self.app.dock.reveal(0.8)
+            dock = self.app.animator.dock_for(hwnd)
+            icon = dock.icon_screen_rect(dock.item_for_hwnd(hwnd, target["exe"]))
+            dock.reveal(0.8)
             self.app.animator.restore(hwnd, icon)
         else:
             force_foreground(hwnd)

@@ -13,7 +13,9 @@ import numpy as np
 from PySide6.QtCore import QObject, QRectF, QTimer, Signal
 from PySide6.QtGui import QBrush, QImage, QPixmap, QTransform
 
-from .winapi import grab_screen_scaled, primary_monitor_rect
+import win32gui
+
+from .winapi import grab_screen_scaled, window_monitor
 
 DOWNSCALE = 4      # размываем копию в 4 раза меньше — быстро, а после размытия разницы не видно
 MARGIN = 28        # снимаем чуть больше, чтобы у краёв размытие не темнело
@@ -79,12 +81,13 @@ class Glass(QObject):
         if r is None or r.width() < 2 or r.height() < 2:
             return None
         dpr = self.w.devicePixelRatioF()
-        tl = self.w.mapToGlobal(r.topLeft().toPoint())
-        ml, mt, mr, mb = primary_monitor_rect()
-        x0 = max(round(tl.x() * dpr) - MARGIN, ml)
-        y0 = max(round(tl.y() * dpr) - MARGIN, mt)
-        x1 = min(round((tl.x() + r.width()) * dpr) + MARGIN, mr)
-        y1 = min(round((tl.y() + r.height()) * dpr) + MARGIN, mb)
+        hwnd = int(self.w.winId())
+        wl, wt = win32gui.GetWindowRect(hwnd)[:2]
+        _, (ml, mt, mr, mb) = window_monitor(hwnd)
+        x0 = max(round(wl + r.left() * dpr) - MARGIN, ml)
+        y0 = max(round(wt + r.top() * dpr) - MARGIN, mt)
+        x1 = min(round(wl + r.right() * dpr) + MARGIN, mr)
+        y1 = min(round(wt + r.bottom() * dpr) + MARGIN, mb)
         if x1 - x0 < 8 or y1 - y0 < 8:
             return None
         return x0, y0, x1, y1
@@ -123,9 +126,9 @@ class Glass(QObject):
         dpr = self.w.devicePixelRatioF()
         self.pix = QPixmap.fromImage(img)
         # маленький снимок растягивается при отрисовке: сдвиг на место + масштаб обратно
-        origin = self.w.mapFromGlobal(QRectF(x0 / dpr, y0 / dpr, 1, 1).topLeft().toPoint())
+        wl, wt = win32gui.GetWindowRect(int(self.w.winId()))[:2]
         sx, sy = (x1 - x0) / dpr / img.width(), (y1 - y0) / dpr / img.height()
-        self.transform = QTransform(sx, 0, 0, sy, origin.x(), origin.y())
+        self.transform = QTransform(sx, 0, 0, sy, (x0 - wl) / dpr, (y0 - wt) / dpr)
         self.w.update()
 
     def fill(self, painter, path):
