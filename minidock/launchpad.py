@@ -26,7 +26,7 @@ from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 from .config import CFG_DIR, ICON_CACHE
 from . import uninstall
 from .folders import folder_image
-from .ui import MacMenu, animate, clamp, ease_out, lerp, per_frame, popup_menu, precise_timer, smooth
+from .ui import MacMenu, animate, clamp, ease_out, lerp, paint_background, per_frame, popup_menu, precise_timer, smooth
 from .winapi import enable_blur, enum_start_apps, force_foreground, resolve_lnk, shell_icon_image
 
 JUNK = re.compile(r"(uninstall|деинстал|удален|удалить|readme|read me|release notes|help|справк|documentation|"
@@ -609,6 +609,9 @@ class Launchpad(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         p.fillRect(self.rect(), QColor(12, 12, 16, 130))
+        whole = QPainterPath()
+        whole.addRect(QRectF(self.rect()))
+        paint_background(p, whole, "launchpad")
         dpr = self.devicePixelRatioF()
 
         # переключатель режимов

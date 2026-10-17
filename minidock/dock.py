@@ -18,14 +18,16 @@ from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontM
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
 from .folders import FolderPopup, folder_pixmap
-from .ui import GLASS, TOP_FLAGS, MacMenu, lerp_rect, live_for, make_glass, popup_menu, precise_timer, smooth
+from .ui import (GLASS, TOP_FLAGS, MacMenu, lerp_rect, live_for, make_glass, paint_background, popup_menu, precise_timer,
+                 smooth)
 from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, resolve_lnk, syscommand,
                      window_monitor)
 
 
 class Item:
     def __init__(self, kind, path="", name="", pixmap=None):
-        self.kind = kind  # app | running | folder | sep | trash | launchpad
+        self.kind = kind  # app | running | folder | sep | trash | launchpad | widget
+        self.widget = None  # id виджета (kind == "widget")
         self.path = path
         self.name = name
         self.pix = pixmap
@@ -125,6 +127,8 @@ class Dock(QWidget):
         self.setAcceptDrops(True)
         self.setWindowTitle("MiniDock")
 
+        self.widget_flyouts = {}  # id виджета -> его окно над доком
+        app.widgets.changed.connect(self.on_widget_data)
         self.pinned = self.load_pinned(self.cfg["pinned"])
         self.folder_popup = FolderPopup(self)
         self.merge_target = None  # иконка, на которую сейчас «бросят» перетаскиваемую — получится папка
@@ -358,7 +362,8 @@ class Dock(QWidget):
         """Закреплённые и запущенные программы, включая лежащие в папках (без самих папок)."""
         out = []
         for it in self.pinned:
-            out += it.children if it.kind == "folder" else [it]
+            if it.kind != "widget":
+                out += it.children if it.kind == "folder" else [it]
         return out + self.running
 
     def item_for_hwnd(self, hwnd, exe=None):
@@ -529,7 +534,7 @@ class Dock(QWidget):
         need = (moved and (in_zone or self.hover > 0)) or (at_edge and self.hide_k > 0) \
             or (now < self.reveal_until and self.hide_k > 0)
         if self.cfg["autohide"]:
-            if at_edge or in_zone or self.menu_open or self.app.preview.mouse_inside():
+            if at_edge or in_zone or self.menu_open or self.app.preview.mouse_inside() or self.widget_open():
                 self.last_seen = now
             elif self.hide_k < 1 and now - self.last_seen > float(self.cfg["autohide_delay"]):
                 need = True  # пора прятать док
@@ -630,6 +635,7 @@ class Dock(QWidget):
         color = QColor(cfg["dock_color"])
         color.setAlpha(int(cfg["dock_opacity"]))
         p.fillPath(path, color)
+        paint_background(p, path, "dock")
         if cfg["dock_border"]:
             p.setPen(QPen(QColor(255, 255, 255, 50), 1))
             p.drawPath(path)
@@ -652,7 +658,9 @@ class Dock(QWidget):
             dv = 0.0
             if it.bounce_start is not None:
                 dv = abs(math.sin((now - it.bounce_start) * math.pi * 1.6)) * B * 0.45
-            if it.pix and r.width() > 1:
+            if it.kind == "widget" and r.width() > 1:
+                self.app.widgets.paint_tile(it.widget, p, self.to_win_rect(r.translated(0, dv)))
+            elif it.pix and r.width() > 1:
                 pix = it.pix_for(r.width() * dpr)
                 p.drawPixmap(self.to_win_rect(r.translated(0, dv)), pix, QRectF(pix.rect()))
             if it.hwnds and cfg["indicator"] != "none":
@@ -735,7 +743,7 @@ class Dock(QWidget):
         others = [o for o in self.pinned if o is not it]
         # курсор над серединой другой иконки — не переставляем, а предлагаем сложить в папку
         self.merge_target = None
-        if it.kind != "folder" and not self.drag_remove():
+        if it.kind not in ("folder", "widget") and not self.drag_remove():
             for o in others:
                 r = self.targets.get(o)
                 if r is not None and o.kind in ("app", "folder") and abs(u - r.center().x()) < r.width() * 0.3:
@@ -772,6 +780,9 @@ class Dock(QWidget):
             self.activate(it)
 
     def activate(self, it, new_window=False):
+        if it.kind == "widget":
+            self.open_widget(it)
+            return
         if it.kind == "trash":
             subprocess.Popen(["explorer.exe", "shell:RecycleBinFolder"])
             return
@@ -801,12 +812,15 @@ class Dock(QWidget):
             it.bounce_start = None
 
     # -- pin management
-    @staticmethod
-    def load_pinned(entries):
-        """В настройках: путь программы или {"folder": имя, "items": [пути]}."""
+    def load_pinned(self, entries):
+        """В настройках: путь программы, {"folder": имя, "items": [пути]} или {"widget": id}."""
         out = []
         for e in entries:
-            if isinstance(e, dict):
+            if isinstance(e, dict) and "widget" in e:
+                it = self.make_widget_item(e["widget"])
+                if it is not None:
+                    out.append(it)
+            elif isinstance(e, dict):
                 kids = [Item.from_path(p) for p in e.get("items", []) if os.path.exists(p)]
                 out.append(Item.make_folder(e.get("folder") or "Папка", kids))
             elif os.path.exists(e):
@@ -815,10 +829,46 @@ class Dock(QWidget):
 
     def save_pinned(self):
         self.cfg["pinned"] = [{"folder": it.name, "items": [c.path for c in it.children]} if it.kind == "folder"
+                              else {"widget": it.widget} if it.kind == "widget"
                               else it.path for it in self.pinned]
         self.app.save_soon()
         self.app.pinned_changed(self)
         self.wake()  # иконки переставились — доанимировать
+
+    # -- виджеты в доке
+    def make_widget_item(self, wid):
+        cls = self.app.widgets.classes.get(wid)
+        if cls is None:
+            return None
+        it = Item("widget", name=cls.name.split(" — ")[0] or wid)
+        it.widget = wid
+        return it
+
+    def add_widget(self, wid):
+        it = self.make_widget_item(wid)
+        if it is not None:
+            self.pinned.append(it)
+            self.save_pinned()
+
+    def open_widget(self, it):
+        from .barwidgets import WidgetFlyout
+        fly = self.widget_flyouts.get(it.widget)
+        if fly is None:
+            fly = self.widget_flyouts[it.widget] = WidgetFlyout(self, self.app.widgets, it.widget)
+        if fly.isVisible():
+            fly.close()
+            return
+        fly.open_under(self.icon_global_rect(it), self.side)
+
+    def flyout_closed(self, fly):
+        self.wake()
+
+    def widget_open(self):
+        return any(f.isVisible() for f in self.widget_flyouts.values())
+
+    def on_widget_data(self):
+        if self.isVisible() and any(it.kind == "widget" for it in self.pinned):
+            self.update()
 
     # -- папки
     def folders(self):
@@ -949,9 +999,18 @@ class Dock(QWidget):
         elif it is not None and it.kind == "trash":
             m.addAction("Открыть корзину", lambda: self.activate(it))
             m.addSeparator()
+        elif it is not None and it.kind == "widget":
+            m.addAction("Открыть", lambda: self.open_widget(it))
+            m.addAction("Убрать из дока", lambda: self.unpin(it))
+            m.addSeparator()
 
         m.addAction("Добавить приложение…", self.add_dialog)
         m.addAction("Новая папка", self.new_folder)
+        in_dock = {o.widget for o in self.pinned if o.kind == "widget"}
+        widgets = m.sub("Добавить виджет")
+        for wid, name in self.app.widgets.available():
+            a = widgets.addAction(name, lambda wid=wid: self.add_widget(wid))
+            a.setEnabled(wid not in in_dock)
         pos_menu = m.sub("Положение на экране")
         grp = QActionGroup(pos_menu)
         for label, value in (("Снизу", "bottom"), ("Слева", "left"), ("Справа", "right")):

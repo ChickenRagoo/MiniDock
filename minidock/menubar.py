@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from .flyouts import (BatteryFlyout, ClockFlyout, LangFlyout, TrayFlyout, VolumeFlyout, WifiFlyout, volume_endpoint,
                       volume_glyph)
-from .ui import MDL2, TOP_FLAGS, MacMenu, ease_out, per_frame, popup_menu, precise_timer, smooth
+from .ui import MDL2, TOP_FLAGS, MacMenu, ease_out, paint_background, per_frame, popup_menu, precise_timer, smooth
 from .winapi import (app_windows, appbar_release, appbar_reserve, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
                      syscommand, user32, window_exe)
 
@@ -177,6 +177,9 @@ class MenuBar(QWidget):
         p.setRenderHint(QPainter.Antialiasing)
         p.translate(0, -self.H * (1 - ease_out(self.slide)))
         p.fillRect(self.rect(), QColor(24, 24, 28, int(self.cfg["bar_opacity"])))
+        strip = QPainterPath()
+        strip.addRect(QRectF(self.rect()))
+        paint_background(p, strip, "menubar")
         p.setPen(QColor(255, 255, 255, 25))
         p.drawLine(0, self.H - 1, self.width(), self.H - 1)
         self.hits = []

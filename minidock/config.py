@@ -57,6 +57,7 @@ DEFAULT_CFG = {
     "dock_blur": True,
     "glass_live_parts": ["dock", "bar", "switcher", "previews", "spotlight", "folders", "menus"],  # где живое
     "dock_peek": True,            # наведение на миниатюру окна над доком показывает окно целиком (как в Windows)
+    "backgrounds": {},            # свои картинки фона: часть интерфейса -> {"path": файл, "opacity": 0..1}
     "glass_live": True,           # живой фон «стекла» (лупа Windows), иначе — снимок в момент появления
     "glass_radius": 18,           # сила размытия
     "dock_radius": 0.3,           # скругление, доля размера иконки

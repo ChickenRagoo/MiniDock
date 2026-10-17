@@ -19,6 +19,9 @@
         ("bar", подпись, доля 0..1, значение)  — полоса заполнения (лимиты, загрузка)
         ("button", подпись, действие)          — кнопка: функция или адрес/путь (открывается в Windows)
         ("sep",)                               — разделитель
+    paint_tile(painter, rect, data) — необязательно: как виджет выглядит в доке (квадрат размером с иконку);
+                    без него в доке — плитка со значком и надписью text(data).
+Виджеты добавляются и на панель (настройки), и в док (правый клик по доку → «Добавить виджет»).
 """
 import datetime
 import importlib.util
@@ -58,6 +61,7 @@ class BarWidget:
         return []
 
     paint_icon = None  # необязательно: функция (painter, QRectF) — свой значок вместо символа icon
+    paint_tile = None  # необязательно: (painter, QRectF, данные) — как виджет выглядит в доке (размер иконки)
 
 
 # -- встроенные -----------------------------------------------------------------------------------
@@ -116,6 +120,21 @@ class SystemWidget(BarWidget):
 
     def text(self, d):
         return f"ЦП {d['cpu']:.0f}%   ОЗУ {d['mem']:.0f}%"
+
+    def paint_tile(self, p, rect, d):
+        """В доке: процессор — внешнее кольцо, память — внутреннее, в центре процент процессора."""
+        tile_base(p, rect)
+        s = rect.width()
+        w = max(2.0, s * 0.07)
+        outer = rect.adjusted(s * 0.14, s * 0.14, -s * 0.14, -s * 0.14)
+        inner = outer.adjusted(w * 1.6, w * 1.6, -w * 1.6, -w * 1.6)
+        tile_ring(p, outer, d["cpu"] / 100, _level_color(d["cpu"] / 100), w)
+        tile_ring(p, inner, d["mem"] / 100, _level_color(d["mem"] / 100, QColor(48, 209, 88)), w)
+        f = QFont("Segoe UI Semibold")
+        f.setPixelSize(max(6, int(s * 0.17)))
+        p.setFont(f)
+        p.setPen(QColor(245, 245, 248))
+        p.drawText(inner, Qt.AlignCenter, f"{d['cpu']:.0f}%")
 
     def panel(self, d):
         rows = [("title", "Система"),
@@ -585,6 +604,19 @@ class ClaudeWidget(BarWidget):
     def pct(g):
         return "—" if g[0] is None else f"{min(g[0], 1.0) * 100:.0f}%"
 
+    def paint_tile(self, p, rect, d):
+        """В доке: сессия — внешнее кольцо, неделя — внутреннее, логотип в центре."""
+        tile_base(p, rect)
+        s = rect.width()
+        w = max(2.0, s * 0.07)
+        outer = rect.adjusted(s * 0.13, s * 0.13, -s * 0.13, -s * 0.13)
+        inner = outer.adjusted(w * 1.6, w * 1.6, -w * 1.6, -w * 1.6)
+        five, week = self.gauges(d) if d.get("claude") else ((None, False), (None, False))
+        tile_ring(p, outer, five[0], _level_color(five[0], CLAUDE_ORANGE), w)
+        tile_ring(p, inner, week[0], _level_color(week[0], QColor(240, 170, 140)), w)
+        c = inner.center()
+        paint_claude_logo(p, QRectF(c.x() - s * 0.13, c.y() - s * 0.13, s * 0.26, s * 0.26))
+
     def text(self, d):
         if not d.get("claude"):
             return "—"
@@ -844,6 +876,14 @@ class WidgetHost(QObject):
     def enabled(self):
         return [i for i in self.cfg.get("bar_widgets", []) if i in self.classes]
 
+    def active(self):
+        """Что опрашивать: виджеты верхней панели и виджеты в доке."""
+        ids = self.enabled()
+        for e in self.cfg.get("pinned") or []:
+            if isinstance(e, dict) and e.get("widget") in self.classes and e["widget"] not in ids:
+                ids.append(e["widget"])
+        return ids
+
     def set_enabled(self, wid, on):
         lst = [i for i in self.cfg.get("bar_widgets", []) if i != wid]
         if on:
@@ -874,7 +914,7 @@ class WidgetHost(QObject):
         while True:
             now = time.monotonic()
             nearest = 5.0
-            for wid in self.enabled():
+            for wid in self.active():
                 inst = self.instance(wid)
                 if inst is None:
                     continue
@@ -905,6 +945,24 @@ class WidgetHost(QObject):
         except Exception:
             return "⚠"
 
+    def paint_tile(self, wid, p, rect):
+        """Виджет в доке: свой рисунок виджета или плитка «значок + надпись»."""
+        inst, data = self.instance(wid), self.data.get(wid)
+        cls = self.classes.get(wid)
+        ok = data is not None and not (isinstance(data, dict) and "__error__" in data)
+        if inst is not None and ok and getattr(inst, "paint_tile", None):
+            try:
+                p.save()
+                inst.paint_tile(p, rect, data)
+                return
+            except Exception:
+                traceback.print_exc()
+            finally:
+                p.restore()
+        p.save()
+        paint_default_tile(p, rect, cls, self.bar_text(wid))
+        p.restore()
+
     def panel_rows(self, wid):
         inst, data = self.instances.get(wid), self.data.get(wid)
         name = self.classes[wid].name if wid in self.classes else wid
@@ -919,6 +977,47 @@ class WidgetHost(QObject):
 
 
 # -- окно виджета ---------------------------------------------------------------------------------
+
+def tile_base(p, rect):
+    """Подложка виджета в доке — скруглённый квадрат, как у иконок."""
+    p.setPen(Qt.NoPen)
+    p.fillPath(rounded_path(rect, rect.width() * 0.22), QColor(38, 38, 46, 235))
+    p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+    p.setBrush(Qt.NoBrush)
+    p.drawPath(rounded_path(rect, rect.width() * 0.22))
+
+
+def tile_ring(p, rect, frac, color, width):
+    pen = QPen(QColor(255, 255, 255, 30), width)
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawEllipse(rect)
+    if frac is not None and frac > 0.004:
+        pen.setColor(color)
+        p.setPen(pen)
+        p.drawArc(rect, 90 * 16, -int(360 * 16 * min(frac, 1.0)))
+
+
+def paint_default_tile(p, rect, cls, text):
+    tile_base(p, rect)
+    s = rect.width()
+    icon = QRectF(rect.center().x() - s * 0.17, rect.top() + s * 0.16, s * 0.34, s * 0.34)
+    if cls is not None and cls.paint_icon:
+        cls.paint_icon(p, icon)
+    elif cls is not None and cls.icon:
+        f = QFont("Segoe MDL2 Assets")
+        f.setPixelSize(max(6, int(s * 0.28)))
+        p.setFont(f)
+        p.setPen(QColor(235, 235, 240))
+        p.drawText(icon, Qt.AlignCenter, cls.icon)
+    f = QFont("Segoe UI Semibold")
+    f.setPixelSize(max(6, int(s * 0.17)))
+    p.setFont(f)
+    p.setPen(QColor(245, 245, 248))
+    box = QRectF(rect.left() + s * 0.06, rect.top() + s * 0.56, s * 0.88, s * 0.3)
+    p.drawText(box, Qt.AlignCenter, QFontMetricsF(f).elidedText(text, Qt.ElideRight, box.width()))
+
 
 ROW_H = {"title": 26, "text": 20, "value": 24, "bar": 40, "sep": 13, "button": 34, "rings": 156, "stats": 62}
 

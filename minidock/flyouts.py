@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QCalendarWidget, QFrame, QGridLayou
 from . import audio
 from .livecapture import blur_bgra
 from .media import MediaWatcher
-from .ui import MDL2, animate, fade_in, make_glass, prepare_glass, rounded_path
+from .ui import MDL2, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
 from .winapi import (enable_blur, file_icon, force_foreground, kernel32, keyboard_layouts, lang_name, press_keys,
                      round_window, shell_icon_image, tray_click, tray_icons, try_foreground, user32)
 
@@ -108,16 +108,22 @@ class Flyout(QWidget):
         b.clicked.connect(clicked)
         return b
 
-    def open_under(self, anchor_global):
+    def open_under(self, anchor_global, side="top"):
+        """Показать под anchor (панель сверху) или рядом с доком: side — край экрана, у которого док."""
         self.clear()
         self.build()
         self.lay.activate()
         w = max(self.WIDTH, self.sizeHint().width())
         h = self.sizeHint().height()
         self.resize(w, h)
-        scr = QApplication.primaryScreen().geometry()
+        scr = (QApplication.screenAt(anchor_global.center().toPoint()) or QApplication.primaryScreen()).geometry()
         x = int(min(max(anchor_global.center().x() - w / 2, scr.left() + 6), scr.right() - w - 6))
         y = int(anchor_global.bottom() + 6)
+        if side == "bottom":
+            y = int(anchor_global.top() - h - 10)
+        elif side in ("left", "right"):
+            y = int(min(max(anchor_global.center().y() - h / 2, scr.top() + 6), scr.bottom() - h - 6))
+            x = int(anchor_global.right() + 10 if side == "left" else anchor_global.left() - w - 10)
         self.move(x, y)
         self.show()
         QTimer.singleShot(20, lambda: self.isVisible() and try_foreground(int(self.winId())))
@@ -158,6 +164,7 @@ class Flyout(QWidget):
         path = rounded_path(QRectF(0, 0, self.width(), h), 12)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(34, 34, 40, 150))
+        paint_background(p, path, "bar")
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.drawPath(path)
 

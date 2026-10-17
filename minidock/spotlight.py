@@ -14,7 +14,7 @@ from PySide6.QtCore import QFileInfo, QObject, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QFileIconProvider, QLineEdit, QMessageBox, QWidget
 
-from .ui import MDL2, animate, fade_in, make_glass, prepare_glass, rounded_path
+from .ui import MDL2, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
 from .winapi import enable_blur, force_foreground, round_window, user32
 
 ROW_H, HEAD_H, TOP_H, WIDTH, MAX_ROWS = 40, 24, 62, 720, 11
@@ -392,6 +392,7 @@ class Spotlight(QWidget):
         path = rounded_path(self.rect(), 14)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(32, 32, 38, 175))
+        paint_background(p, path, "spotlight")
         p.setPen(QPen(QColor(255, 255, 255, 45), 1))
         p.drawPath(path)
         p.setFont(QFont(MDL2, 15))

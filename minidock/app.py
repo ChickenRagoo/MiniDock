@@ -23,7 +23,7 @@ from .previews import WindowPreview
 from .spotlight import Spotlight
 from .switcher import KeyHook, Switcher, WinSwitcher
 from .elevation import open_security
-from .ui import GLASS
+from .ui import BACKGROUNDS, GLASS
 from .updater import Updater
 from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
@@ -39,7 +39,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
-            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock"}
+            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
+            "--test-dock-widget": "MiniDock_TestDockWidget"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -59,8 +60,8 @@ class App:
         self.save_timer = QTimer(singleShot=True, interval=400, timeout=lambda: save_cfg(self.cfg))
         self.animator = WindowAnimator(self)
         self.preview = WindowPreview(self)
+        self.widgets = WidgetHost(self.cfg)  # до дока: в доке тоже бывают виджеты
         self.dock = Dock(self)
-        self.widgets = WidgetHost(self.cfg)
         self.bar = MenuBar(self)
         self.extra_bars = {}  # имя монитора -> панель на дополнительном мониторе
         self.extra_docks = {}  # имя монитора -> док на дополнительном мониторе
@@ -152,6 +153,8 @@ class App:
         cfg = self.cfg
         GLASS["live"] = bool(cfg["glass_live"])
         GLASS["live_parts"] = tuple(cfg["glass_live_parts"])
+        BACKGROUNDS.clear()
+        BACKGROUNDS.update(cfg["backgrounds"])
         GLASS["radius"] = float(cfg["glass_radius"])
         if cfg["replace_taskbar"]:
             self.taskbar.hide()
@@ -343,6 +346,11 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-dock-widget":  # окно первого виджета в доке (для проверки)
+            it = next((it for it in self.dock.pinned if it.kind == "widget"), None)
+            if it is not None:
+                self.dock.reveal(4.0)
+                QTimer.singleShot(500, lambda: self.dock.open_widget(it))
         elif flag == "--test-clock":  # открыть календарь под часами (для проверки)
             from PySide6.QtCore import QRectF as _R
             from .flyouts import ClockFlyout

@@ -1,6 +1,5 @@
 """Окно настроек MiniDock в стиле «Системных настроек» macOS. Все изменения применяются сразу."""
 import os
-import subprocess
 
 from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
@@ -12,7 +11,7 @@ from .barwidgets import WIDGETS_DIR
 from .config import CFG_DIR, DEFAULT_CFG
 from .updater import PAGE
 from .version import __version__
-from .ui import GLASS_PARTS, MDL2, Toggle, fade_in, rounded_path
+from .ui import BG_PARTS, GLASS_PARTS, MDL2, Toggle, fade_in, rounded_path
 from .winapi import autostart_enabled, enable_blur, round_window, set_autostart
 
 QSS = """
@@ -47,6 +46,7 @@ PAGES = [
     ("", "Основные"),
     ("", "Док"),
     ("", "Внешний вид"),
+    ("", "Фоны"),
     ("", "Анимации"),
     ("", "Верхняя панель"),
     ("", "Alt+Tab"),
@@ -108,7 +108,8 @@ class SettingsWindow(QWidget):
         outer.addWidget(side)
 
         self.stack = QStackedWidget()
-        for build in (self.page_general, self.page_dock, self.page_look, self.page_anim, self.page_bar,
+        for build in (self.page_general, self.page_dock, self.page_look, self.page_backgrounds, self.page_anim,
+                      self.page_bar,
                       self.page_switcher, self.page_launchpad, self.page_updates, self.page_about):
             self.stack.addWidget(self.scroll(build()))
         outer.addWidget(self.stack, 1)
@@ -384,6 +385,90 @@ class SettingsWindow(QWidget):
         follow(self.cfg["glass_live"])
         return rows
 
+    def page_backgrounds(self):
+        w, lay = self.page("Фоны")
+        note = QLabel("Своя картинка вместо фона любой части интерфейса. Картинка заполняет фон целиком "
+                      "(по центру, с обрезкой — как обои рабочего стола) и рисуется поверх размытия; "
+                      "прозрачностью можно оставить размытие видным сквозь неё.")
+        note.setObjectName("desc")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self.group(lay, [self.background_row(part, title) for part, title in BG_PARTS])
+        lay.addStretch()
+        return w
+
+    def background_row(self, part, title):
+        """Строка части интерфейса: имя файла, «Выбрать…», «Убрать», прозрачность картинки."""
+        spec = dict(self.cfg["backgrounds"].get(part) or {})
+        desc = QLabel(os.path.basename(spec["path"]) if spec.get("path") else "Без картинки")
+        desc.setObjectName("desc")
+        opacity = QSlider(Qt.Horizontal)
+        opacity.setFixedWidth(120)
+        opacity.setRange(5, 100)
+        opacity.setValue(round(float(spec.get("opacity", 1.0)) * 100))
+        opacity.setEnabled(bool(spec.get("path")))
+        opacity.setToolTip("Непрозрачность картинки")
+
+        def store(new):
+            bgs = dict(self.cfg["backgrounds"])
+            if new:
+                bgs[part] = new
+            else:
+                bgs.pop(part, None)
+            self.app.set_cfg("backgrounds", bgs)
+            desc.setText(os.path.basename(new["path"]) if new else "Без картинки")
+            opacity.setEnabled(bool(new))
+
+        def choose():
+            from PySide6.QtWidgets import QFileDialog
+            src, _ = QFileDialog.getOpenFileName(self, f"Картинка для фона: {title}", "",
+                                                 "Картинки (*.png *.jpg *.jpeg *.bmp *.webp *.gif)")
+            if not src:
+                return
+            import shutil
+            import time
+            folder = CFG_DIR / "backgrounds"
+            folder.mkdir(parents=True, exist_ok=True)
+            # копия у себя — фон не пропадёт, если исходный файл переместят; новое имя — новая картинка в кэше
+            dst = folder / f"{part}_{int(time.time())}{os.path.splitext(src)[1].lower()}"
+            shutil.copyfile(src, dst)
+            old = (self.cfg["backgrounds"].get(part) or {}).get("path")
+            store({"path": str(dst), "opacity": opacity.value() / 100})
+            if old and os.path.dirname(old) == str(folder):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+
+        def remove():
+            old = (self.cfg["backgrounds"].get(part) or {}).get("path")
+            store(None)
+            if old and os.path.dirname(old) == str(CFG_DIR / "backgrounds"):
+                try:
+                    os.remove(old)
+                except OSError:
+                    pass
+
+        def set_opacity(v):
+            cur = self.cfg["backgrounds"].get(part)
+            if cur:
+                store(dict(cur, opacity=v / 100))
+        opacity.valueChanged.connect(set_opacity)
+        box = QHBoxLayout()
+        box.addWidget(opacity)
+        box.addWidget(self.button("Выбрать…", choose))
+        box.addWidget(self.button("Убрать", remove))
+        row = QWidget()
+        hl = QHBoxLayout(row)
+        hl.setContentsMargins(0, 9, 0, 9)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        text.addWidget(QLabel(title))
+        text.addWidget(desc)
+        hl.addLayout(text, 1)
+        hl.addLayout(box)
+        return row
+
     def page_anim(self):
         w, lay = self.page("Анимации")
         self.group(lay, [
@@ -399,7 +484,7 @@ class SettingsWindow(QWidget):
         ])
         self.group(lay, [
             self.row("Системная анимация Windows",
-                     self.button("Открыть", lambda: subprocess.Popen(["SystemPropertiesPerformance.exe"])),
+                     self.button("Открыть", lambda: os.startfile("SystemPropertiesPerformance.exe", "runas")),
                      "Чтобы анимации не накладывались, снимите галочку «Анимация окон при свёртывании "
                      "и развёртывании»."),
         ])

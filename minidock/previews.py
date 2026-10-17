@@ -19,7 +19,7 @@ from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QFontMetricsF, QPainte
 from PySide6.QtWidgets import QApplication, QWidget
 
 from .animations import THUMB_PROPS
-from .ui import TOP_FLAGS, animate, fade_in, make_glass, prepare_glass, rounded_path
+from .ui import TOP_FLAGS, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
 from .winapi import (dwmapi, force_foreground, live_peek, native_overlay_window, syscommand, window_aspect,
                      window_geometry)
 
@@ -359,6 +359,7 @@ class WindowPreview(QWidget):
         path = rounded_path(self.rect(), self.RADIUS)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(30, 30, 36, 165))
+        paint_background(p, path, "previews")
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.drawPath(path)
         for i, (h, thumb) in enumerate(self.tiles):

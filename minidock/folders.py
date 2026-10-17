@@ -6,7 +6,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
-from .ui import MacMenu, fade_in, make_glass, popup_menu, prepare_glass, rounded_path
+from .ui import MacMenu, fade_in, make_glass, paint_background, popup_menu, prepare_glass, rounded_path
 from .winapi import try_foreground
 
 
@@ -165,6 +165,7 @@ class FolderPopup(QWidget):
         path = rounded_path(self.rect(), 16)
         self.glass.fill(p, path)
         p.fillPath(path, QColor(34, 34, 40, 165))
+        paint_background(p, path, "folders")
         p.setPen(QPen(QColor(255, 255, 255, 45), 1))
         p.drawPath(path)
         dpr = self.devicePixelRatioF()

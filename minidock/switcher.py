@@ -11,7 +11,8 @@ from PySide6.QtWidgets import QApplication, QWidget
 
 from .dock import Item
 from .previews import THUMB_RADIUS, LiveThumbs, close_button_rect, paint_close_button, row_layout, window_title
-from .ui import TOP_FLAGS, animate, fade_in, lerp, make_glass, precise_timer, prepare_glass, rounded_path, smooth
+from .ui import (TOP_FLAGS, animate, fade_in, lerp, make_glass, paint_background, precise_timer, prepare_glass, rounded_path,
+                 smooth)
 from .winapi import (KBDLLHOOKSTRUCT, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RMENU,
                      VK_RWIN, VK_SHIFT, VK_TAB, key_text, LowLevelKeyboardProc, app_name_for, app_windows, force_foreground,
                      inject_dummy, inject_key, kernel32, key_down, press_keys, syscommand, user32)
@@ -525,6 +526,7 @@ class Switcher(QWidget):
         path = rounded_path(self.rect(), self.radius())
         self.glass.fill(p, path)
         p.fillPath(path, QColor(30, 30, 36, int(self.cfg["switcher_opacity"])))
+        paint_background(p, path, "switcher")
         p.setPen(QPen(QColor(255, 255, 255, 45), 1))
         p.drawPath(path)
         if not self.apps:
@@ -897,6 +899,7 @@ class WinSwitcher(QWidget):
         path = rounded_path(self.rect(), float(self.cfg["switcher_radius"]))
         self.glass.fill(p, path)
         p.fillPath(path, QColor(30, 30, 36, int(self.cfg["switcher_opacity"])))
+        paint_background(p, path, "switcher")
         p.setPen(QPen(QColor(255, 255, 255, 45), 1))
         p.drawPath(path)
         fm = QFontMetricsF(self.font_title)

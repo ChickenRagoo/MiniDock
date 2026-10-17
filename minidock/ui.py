@@ -5,7 +5,7 @@ import time
 from ctypes import wintypes
 
 from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QAbstractButton, QMenu
 
 from . import glass
@@ -271,6 +271,57 @@ GLASS_PARTS = (("dock", "Док"), ("bar", "Окна верхней панели
                ("menus", "Контекстные меню"))
 
 
+# Свои картинки фона (настройка backgrounds): часть интерфейса -> {"path": файл, "opacity": 0..1}
+BG_PARTS = (("dock", "Док"), ("menubar", "Верхняя панель"), ("bar", "Окна верхней панели"), ("switcher", "Alt+Tab"),
+            ("previews", "Миниатюры окон над доком"), ("spotlight", "Spotlight"), ("folders", "Папки"),
+            ("menus", "Контекстные меню"), ("launchpad", "Launchpad"))
+BACKGROUNDS = {}
+_bg_source = {}   # путь -> уменьшенная копия картинки (чтобы не масштабировать огромный файл каждый кадр)
+_bg_scaled = {}   # (путь, ширина, высота) -> картинка, уже обрезанная «по размеру окна»
+
+
+def _bg_pixmap(path, w, h):
+    w, h = max(1, -(-w // 16) * 16), max(1, -(-h // 16) * 16)  # шаг 16 px: док «дышит» при наведении
+    key = (path, w, h)
+    pix = _bg_scaled.get(key)
+    if pix is None:
+        src = _bg_source.get(path)
+        if src is None:
+            img = QImage(path)
+            if img.isNull():
+                return None
+            if max(img.width(), img.height()) > 2560:
+                img = img.scaled(2560, 2560, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            src = _bg_source[path] = img
+        img = src.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+        img = img.copy((img.width() - w) // 2, (img.height() - h) // 2, w, h)  # по центру, как обои
+        if len(_bg_scaled) > 48:
+            _bg_scaled.clear()
+        pix = _bg_scaled[key] = QPixmap.fromImage(img)
+    return pix
+
+
+def paint_background(p, path, part):
+    """Своя картинка фона для части интерфейса: заполняет форму path (по центру, с обрезкой, как обои)
+    поверх стекла и тонировки. False — картинки нет."""
+    spec = BACKGROUNDS.get(part)
+    if not spec or not spec.get("path"):
+        return False
+    rect = path.boundingRect()
+    dev = p.device()
+    dpr = dev.devicePixelRatioF() if dev is not None else 1.0
+    pix = _bg_pixmap(spec["path"], round(rect.width() * dpr), round(rect.height() * dpr))
+    if pix is None:
+        return False
+    p.save()
+    p.setClipPath(path, Qt.IntersectClip)
+    p.setOpacity(p.opacity() * float(spec.get("opacity", 1.0)))
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    p.drawPixmap(rect, pix, QRectF(pix.rect()))
+    p.restore()
+    return True
+
+
 def live_for(part):
     """Живое размытие включено для этой части интерфейса?"""
     return bool(GLASS.get("live", True)) and (part is None or part in GLASS.get("live_parts", (part,)))
@@ -343,6 +394,7 @@ class MacMenu(QMenu):
         p.setRenderHint(QPainter.Antialiasing)
         p.setRenderHint(QPainter.SmoothPixmapTransform)
         self.glass.fill(p, rounded_path(self.rect(), 9))
+        paint_background(p, rounded_path(self.rect(), 9), "menus")
         p.end()
         super().paintEvent(e)
 
