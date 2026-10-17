@@ -39,7 +39,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
-            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock"}
+            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
+            "--test-minimize": "MiniDock_TestMinimize"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -345,6 +346,15 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-minimize":
+            # вывести Блокнот вперёд и через 0,8 с свернуть его так же, как кликом по иконке в доке (для проверки)
+            found = []
+            win32gui.EnumWindows(lambda h, _: found.append(h) if win32gui.IsWindowVisible(h)
+                                 and win32gui.GetClassName(h) == "Notepad" else None, None)
+            if found:
+                force_foreground(found[0])
+
+                QTimer.singleShot(800, lambda h=found[0]: self.animator.minimize(h))
         elif flag == "--test-clock":  # открыть календарь под часами (для проверки)
             from PySide6.QtCore import QRectF as _R
             from .flyouts import ClockFlyout
@@ -508,7 +518,7 @@ class App:
         fg = win32gui.GetForegroundWindow()
         if fg in hwnds:
             if len(hwnds) == 1:
-                win32gui.PostMessage(fg, 0x0112, 0xF020, 0)  # WM_SYSCOMMAND, SC_MINIMIZE
+                self.animator.minimize(fg)
                 return
             nxt = hwnds[(hwnds.index(fg) + 1) % len(hwnds)]
         else:

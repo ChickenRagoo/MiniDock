@@ -284,6 +284,7 @@ class WindowAnimator:
         self.genie = GenieOverlay()    # запасной: живые DWM-миниатюры, если снимок не получился
         self.closer = CloseOverlay()
         self.hidden = {}      # hwnd -> исходный exstyle, пока окно невидимо ради анимации
+        self.pre_min = {}     # hwnd -> когда снят полный кадр перед свёртыванием (кнопка «свернуть», клик в доке)
         self.ours = set()     # окна, которые сейчас разворачиваем мы сами
         self.launches = []    # [exe | None, icon_rect, deadline] — ждём окно запущенной программы
         self.geo = {}         # hwnd -> (рамка, отступы)
@@ -334,10 +335,51 @@ class WindowAnimator:
             while len(self.snaps) > SNAP_LIMIT:  # храним только последние окна (dict помнит порядок)
                 self.snaps.pop(next(iter(self.snaps)))
 
+    def prepare_minimize(self, hwnd):
+        """Окно вот-вот свернётся: снять его полный кадр, пока оно целиком на экране. Тогда анимация
+        свёртывания начнётся сразу, без медленного снимка в момент, когда Windows уже прячет окно (мигание)."""
+        if not self.cfg["animations"]:
+            return
+        self.take_snapshot(hwnd, max_w=4096)
+        if hwnd in self.snaps:
+            self.pre_min[hwnd] = time.monotonic()
+
+    def hold_minimize(self, hwnd):
+        """Поверх окна — его неподвижный кадр (первый кадр анимации свёртывания). GpuGenie или None.
+        Когда Windows спрячет окно, анимация пойдёт с этого кадра — без пустого кадра между ними."""
+        if not self.cfg["animations"] or self.app.fullscreen or self.busy(hwnd) or win32gui.IsIconic(hwnd):
+            return None
+        self.prepare_minimize(hwnd)
+        snap, g = self.snaps.get(hwnd), window_geometry(hwnd)
+        if not snap or not g:
+            return None
+        if not self.play(hwnd, snap[0], g[0], self.icon_for(hwnd), g[1], reverse=False, duration=self.dur(0.5),
+                         mode=self.cfg["minimize_effect"]):
+            return None
+        gpu = self.gpu_with(hwnd)
+        if gpu is None or not gpu.hold(hwnd):
+            return None
+        self.geo[hwnd] = g
+        if snap[0].width() >= g[0][2] - g[0][0] - 2:
+            self.min_imgs.pop(hwnd, None)
+            self.min_imgs[hwnd] = snap[0]
+        return gpu
+
+    def minimize(self, hwnd):
+        """Свернуть окно самим (клик в доке, меню панели): сначала стоп-кадр, потом свёртывание."""
+        gpu = self.hold_minimize(hwnd)
+        send = lambda: win32gui.PostMessage(hwnd, win32con.WM_SYSCOMMAND, win32con.SC_MINIMIZE, 0)
+        if gpu is None:
+            send()
+            return
+        gpu.after_frames(2, send)  # кадр уже на экране — теперь можно прятать окно
+        QTimer.singleShot(1500, lambda: gpu.drop_held(hwnd))  # страховка: окно не свернулось
+
     def on_press(self, hwnd):
-        """Кнопка мыши нажата в окне. Если это крестик (правый верхний угол) — окно, скорее всего,
-        сейчас закроется: снимаем его в полном размере для анимации закрытия."""
-        if not self.cfg["animations"] or not self.cfg["close_animation"]:
+        """Кнопка мыши нажата в окне. Если это кнопки в правом верхнем углу — окно, скорее всего, сейчас
+        свернётся или закроется: снимаем его в полном размере для анимации. Нажата именно «свернуть» —
+        сразу кладём поверх окна его стоп-кадр (окно свернётся, когда кнопку отпустят)."""
+        if not self.cfg["animations"]:
             return
         root = user32.GetAncestor(hwnd, 2)
         g = window_geometry(root) if root else None
@@ -345,8 +387,25 @@ class WindowAnimator:
             return
         x, y = win32gui.GetCursorPos()
         (l, t, r, b), _ = g
-        if r - 220 <= x <= r and t <= y <= t + 60:
-            self.take_snapshot(root, max_w=4096)
+        if not (r - 220 <= x <= r and t <= y <= t + 60):
+            return
+        res = ctypes.c_size_t()
+        lp = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+        hit = user32.SendMessageTimeoutW(root, 0x0084, 0, lp, 2, 60, ctypes.byref(res)) and res.value  # WM_NCHITTEST
+        if hit == 8:  # HTMINBUTTON
+            gpu = self.hold_minimize(root)
+            if gpu is not None:
+                self._watch_release(root, gpu)
+                return
+        self.prepare_minimize(root)
+
+    def _watch_release(self, hwnd, gpu, started=None):
+        """Кнопку мыши отпустили, а окно не свернулось (увели мышь с кнопки) — убрать стоп-кадр."""
+        started = started or time.monotonic()
+        if user32.GetAsyncKeyState(0x01) & 0x8000 and time.monotonic() - started < 10:
+            QTimer.singleShot(30, lambda: self._watch_release(hwnd, gpu, started))
+            return
+        QTimer.singleShot(250, lambda: gpu.drop_held(hwnd))  # свернулось — стоп-кадр уже пошёл в анимацию
 
     def gpu_for(self, rect):
         """Слой анимаций монитора, на котором центр rect (физические пиксели)."""
@@ -423,12 +482,17 @@ class WindowAnimator:
             return
         if not is_app_window(hwnd, need_visible=False):
             return
+        if any(gp.begin_held(hwnd) for gp in self.gpus):  # стоп-кадр уже на месте окна — просто поехали
+            self.dock_for(hwnd).reveal(1.0)
+            return
         g = window_geometry(hwnd) or self.geo.get(hwnd)
         if not g:
             return
         self.geo[hwnd] = g
         self.dock_for(hwnd).reveal(1.0)
-        snap = snapshot(hwnd)  # если окно ещё на экране — свежий кадр
+        ready = self.snaps.get(hwnd) if time.monotonic() - self.pre_min.pop(hwnd, 0) < 2.0 else None
+        # кадр, снятый перед свёртыванием, — анимация стартует сразу; иначе снимаем сейчас (медленнее)
+        snap = (ready[0], None) if ready else snapshot(hwnd)
         img = snap[0] if snap else None
         if img is None:  # уже свёрнуто — берём кадр из DWM
             img = self.genie.capture(hwnd, g[0], g[1], below=self.gpu_for(self.icon_for(hwnd)).hwnd)

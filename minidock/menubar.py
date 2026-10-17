@@ -370,7 +370,7 @@ class MenuBar(QWidget):
         name = self.app_name
         if self.app_exe:
             m.addAction(f"Скрыть «{name}»",
-                        lambda: [syscommand(h, win32con.SC_MINIMIZE) for h in self.app_windows()])
+                        lambda: [self.minimize(h) for h in self.app_windows()])
             m.addAction("Скрыть остальные", self.hide_others)
             m.addSeparator()
             m.addAction("Показать в проводнике",
@@ -383,11 +383,14 @@ class MenuBar(QWidget):
             m.addAction("Свернуть все окна", lambda: press_keys(win32con.VK_LWIN, ord("D")))
         self.menu_at(m, r)
 
+    def minimize(self, hwnd):
+        self.app.animator.minimize(hwnd)  # сначала стоп-кадр окна, потом свёртывание — без мигания
+
     def hide_others(self):
         for exe, hs in app_windows().items():
             if exe != self.app_exe:
                 for h in hs:
-                    syscommand(h, win32con.SC_MINIMIZE)
+                    self.minimize(h)
 
     def window_menu(self, r):
         m = MacMenu(parent=self)
@@ -398,7 +401,7 @@ class MenuBar(QWidget):
                            ("Восстановить" if zoomed else "Развернуть",
                             win32con.SC_RESTORE if zoomed else win32con.SC_MAXIMIZE),
                            ("Закрыть окно", win32con.SC_CLOSE)):
-            a = m.addAction(label, lambda cmd=cmd: syscommand(h, cmd))
+            a = m.addAction(label, lambda cmd=cmd: self.minimize(h) if cmd == win32con.SC_MINIMIZE else syscommand(h, cmd))
             a.setEnabled(ok)
         m.addSeparator()
         m.addAction("Все окна (Task View)", lambda: press_keys(win32con.VK_LWIN, win32con.VK_TAB))

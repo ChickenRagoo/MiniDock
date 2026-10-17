@@ -242,6 +242,34 @@ class GpuGenie:
         a["img"], a["src"], a["dst"] = padded, expand(logical(src)), expand(logical(dst))
         a["ver"] += 1
 
+    # -- «стоп-кадр»: окно ещё на экране, поверх него уже лежит его неподвижный кадр
+    def hold(self, hwnd):
+        """Только что запущенную анимацию окна заморозить на первом кадре (окно на своём месте), пока не
+        позовут begin_held. Так между исчезновением окна и анимацией не бывает пустого кадра."""
+        for a in self.anims:
+            if a["hwnd"] == hwnd and a["release_at"] is None:
+                a["start"] = time.monotonic() + 3600
+                a["held"] = True
+                return True
+        return False
+
+    def begin_held(self, hwnd):
+        for a in self.anims:
+            if a.get("held") and a["hwnd"] == hwnd:
+                a["held"] = False
+                a["start"] = time.monotonic()
+                self.timer.start()
+                return True
+        return False
+
+    def drop_held(self, hwnd):
+        """Окно так и не свернулось — убрать стоп-кадр."""
+        keep = [a for a in self.anims if not (a.get("held") and a["hwnd"] == hwnd)]
+        if len(keep) != len(self.anims):
+            self.anims = keep
+            self.item.update()
+            self.timer.start()
+
     def update_image(self, hwnd, img, src):
         """Подменяет снимок у идущей анимации (например, свежий кадр уже развёрнутого окна)."""
         for a in self.anims:
