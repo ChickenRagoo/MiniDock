@@ -23,7 +23,8 @@ from .winapi import (dwmapi, force_foreground, grab_screen, is_app_window, make_
 
 DEBUG = bool(os.environ.get("MINIDOCK_DEBUG"))
 SNAP_LIMIT = 6  # снимков окон для анимации закрытия (каждый до ~4 МБ)
-MIN_LIMIT = 4   # кадров свёрнутых окон — с них разворачивание начинается мгновенно (каждый до ~15 МБ)
+MIN_BYTES = 96 * 1024 * 1024  # кадры свёрнутых окон (с них разворачивание начинается мгновенно) — не больше
+#                               стольких байт вместе: на 4K один кадр — до 33 МБ, считать штуками нельзя
 
 
 class THUMB_PROPS(ctypes.Structure):
@@ -284,7 +285,9 @@ class WindowAnimator:
         self.genie = GenieOverlay()    # запасной: живые DWM-миниатюры, если снимок не получился
         self.closer = CloseOverlay()
         self.hidden = {}      # hwnd -> исходный exstyle, пока окно невидимо ради анимации
-        self.pre_min = {}     # hwnd -> когда снят полный кадр перед свёртыванием (кнопка «свернуть», клик в доке)
+        # полный кадр окна перед свёртыванием или закрытием (кнопки окна, клик в доке): (hwnd, когда, (QImage,
+        # QRectF логические)). Только последнего окна и ненадолго — полноразмерные кадры тяжёлые
+        self.press_snap = None
         self.ours = set()     # окна, которые сейчас разворачиваем мы сами
         self.launches = []    # [exe | None, icon_rect, deadline] — ждём окно запущенной программы
         self.geo = {}         # hwnd -> (рамка, отступы)
@@ -319,6 +322,8 @@ class WindowAnimator:
         self.geo = {h: g for h, g in self.geo.items() if h in alive or win32gui.IsWindow(h)}
         self.snaps = {h: s for h, s in self.snaps.items() if win32gui.IsWindow(h)}
         self.min_imgs = {h: s for h, s in self.min_imgs.items() if win32gui.IsWindow(h)}
+        if self.press_snap and time.monotonic() - self.press_snap[1] > 5:
+            self.press_snap = None
 
     def take_snapshot(self, hwnd, max_w=1280):
         if not self.cfg["animations"] or self.app.fullscreen or hwnd in self.hidden:
@@ -336,13 +341,33 @@ class WindowAnimator:
                 self.snaps.pop(next(iter(self.snaps)))
 
     def prepare_minimize(self, hwnd):
-        """Окно вот-вот свернётся: снять его полный кадр, пока оно целиком на экране. Тогда анимация
-        свёртывания начнётся сразу, без медленного снимка в момент, когда Windows уже прячет окно (мигание)."""
-        if not self.cfg["animations"]:
+        """Окно вот-вот свернётся (или закроется): снять его полный кадр, пока оно целиком на экране. Тогда
+        анимация начнётся сразу, без медленного снимка в момент, когда Windows уже прячет окно (мигание)."""
+        if not self.cfg["animations"] or self.app.fullscreen or hwnd in self.hidden:
             return
-        self.take_snapshot(hwnd, max_w=4096)
-        if hwnd in self.snaps:
-            self.pre_min[hwnd] = time.monotonic()
+        if not is_app_window(hwnd) or win32gui.IsIconic(hwnd):
+            return
+        g = window_geometry(hwnd)
+        if g:
+            self.geo[hwnd] = g
+        snap = snapshot(hwnd)
+        self.press_snap = (hwnd, time.monotonic(), (snap[0], self.to_logical(snap[1]))) if snap else None
+
+    def fresh_snap(self, hwnd, max_age=2.0, take=False):
+        """Полный кадр, снятый prepare_minimize для этого окна не дольше max_age секунд назад."""
+        ps = self.press_snap
+        if not ps or ps[0] != hwnd or time.monotonic() - ps[1] > max_age:
+            return None
+        if take:
+            self.press_snap = None
+        return ps[2]
+
+    def remember_min(self, hwnd, img):
+        """Кадр свернувшегося окна — с него потом развернём. Старые кадры уходят, когда вместе их слишком много."""
+        self.min_imgs.pop(hwnd, None)
+        self.min_imgs[hwnd] = img
+        while len(self.min_imgs) > 1 and sum(i.sizeInBytes() for i in self.min_imgs.values()) > MIN_BYTES:
+            self.min_imgs.pop(next(iter(self.min_imgs)))
 
     def hold_minimize(self, hwnd):
         """Поверх окна — его неподвижный кадр (первый кадр анимации свёртывания). GpuGenie или None.
@@ -350,7 +375,7 @@ class WindowAnimator:
         if not self.cfg["animations"] or self.app.fullscreen or self.busy(hwnd) or win32gui.IsIconic(hwnd):
             return None
         self.prepare_minimize(hwnd)
-        snap, g = self.snaps.get(hwnd), window_geometry(hwnd)
+        snap, g = self.fresh_snap(hwnd), window_geometry(hwnd)
         if not snap or not g:
             return None
         if not self.play(hwnd, snap[0], g[0], self.icon_for(hwnd), g[1], reverse=False, duration=self.dur(0.5),
@@ -362,8 +387,8 @@ class WindowAnimator:
             return None
         self.geo[hwnd] = g
         if snap[0].width() >= g[0][2] - g[0][0] - 2:
-            self.min_imgs.pop(hwnd, None)
-            self.min_imgs[hwnd] = snap[0]
+            self.remember_min(hwnd, snap[0])
+        self.press_snap = None  # кадр уже в анимации и в min_imgs — второй копии не держим
         return gpu
 
     def minimize(self, hwnd):
@@ -505,7 +530,7 @@ class WindowAnimator:
             return
         self.geo[hwnd] = g
         self.dock_for(hwnd).reveal(1.0)
-        ready = self.snaps.get(hwnd) if time.monotonic() - self.pre_min.pop(hwnd, 0) < 2.0 else None
+        ready = self.fresh_snap(hwnd, take=True)
         # кадр, снятый перед свёртыванием, — анимация стартует сразу; иначе снимаем сейчас (медленнее)
         snap = (ready[0], None) if ready else snapshot(hwnd)
         img = snap[0] if snap else None
@@ -514,10 +539,7 @@ class WindowAnimator:
         if img is None:
             img = (self.snaps.get(hwnd) or (None,))[0]
         elif img.width() >= g[0][2] - g[0][0] - 2:  # полноразмерный кадр — с него потом и развернём
-            self.min_imgs.pop(hwnd, None)
-            self.min_imgs[hwnd] = img
-            while len(self.min_imgs) > MIN_LIMIT:
-                self.min_imgs.pop(next(iter(self.min_imgs)))
+            self.remember_min(hwnd, img)
         if DEBUG:
             print(f"minimize: fresh={bool(snap)} image={img is not None}", flush=True)
         on_gpu = self.play(hwnd, img, g[0], self.icon_for(hwnd), g[1], reverse=False, duration=self.dur(0.5),
@@ -614,12 +636,14 @@ class WindowAnimator:
     def on_hide(self, hwnd):
         if not self.cfg["animations"] or not self.cfg["close_animation"] or hwnd in self.hidden:
             return
-        snap = self.snaps.get(hwnd)
+        snap = self.fresh_snap(hwnd, max_age=5.0) or self.snaps.get(hwnd)
         if not snap or win32gui.IsIconic(hwnd) or not is_app_window(hwnd, need_visible=False):
             return
         if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
             return
-        del self.snaps[hwnd]
+        self.snaps.pop(hwnd, None)
+        if self.press_snap and self.press_snap[0] == hwnd:
+            self.press_snap = None
         dpr = QApplication.primaryScreen().devicePixelRatio()
         r = snap[1]
         frame = (round(r.left() * dpr), round(r.top() * dpr), round(r.right() * dpr), round(r.bottom() * dpr))

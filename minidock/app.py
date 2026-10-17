@@ -25,6 +25,7 @@ from .switcher import KeyHook, Switcher, WinSwitcher
 from .elevation import open_security
 from .ui import BACKGROUNDS, GLASS
 from .updater import Updater
+from .version import __version__
 from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
                      force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, set_window_shadows,
@@ -89,6 +90,9 @@ class App:
         self.beat_timer.start()
         self.heartbeat()
         threading.Thread(target=self.watchdog, daemon=True, name="MiniDockWatchdog").start()
+        self.memory_timer = QTimer(interval=3600 * 1000, timeout=self.memory_report)  # раз в час — в журнал
+        self.memory_timer.start()
+        QTimer.singleShot(60 * 1000, self.memory_report)  # и через минуту после запуска
         self.poll_timer = QTimer(interval=1000, timeout=self.poll)
         self.poll_timer.start()
         # команды (--quit, --launchpad, …) ждёт отдельный поток — в простое он спит и не тратит ничего
@@ -99,6 +103,31 @@ class App:
         self.waiter.fired.connect(self.on_command)
         self.poll()
         self.bar.on_foreground(win32gui.GetForegroundWindow())
+
+    def memory_report(self):
+        """Строка в журнал: мониторы и память — чтобы по присланному error.log было видно, куда она уходит
+        (на 4K и нескольких больших мониторах снимки окон и слои анимаций занимают кратно больше)."""
+        if sys.stderr is None:
+            return
+        try:
+            import psutil
+            me = psutil.Process()
+            helper = sum(c.memory_full_info().private for c in me.children()
+                         if "--live-helper" in " ".join(c.cmdline()))
+            screens = ", ".join(f"{s.size().width()}x{s.size().height()}@{s.devicePixelRatio():g}"
+                                for s in QApplication.screens())
+            an = self.animator
+            mb = lambda n: f"{n / 1048576:.0f}"
+            snaps = sum(img.sizeInBytes() for img, _ in an.snaps.values())
+            mins = sum(img.sizeInBytes() for img in an.min_imgs.values())
+            press = an.press_snap[2][0].sizeInBytes() if an.press_snap else 0
+            mem = mb(me.memory_full_info().private)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M')}] MiniDock {__version__}: экраны {screens}; память {mem} МБ"
+                  f" (помощник размытия {mb(helper)} МБ); снимки окон {len(an.snaps)} шт {mb(snaps)} МБ, свёрнутые"
+                  f" {len(an.min_imgs)} шт {mb(mins)} МБ, кадр кнопок {mb(press)} МБ; слоёв анимации {len(an.gpus)}",
+                  file=sys.stderr, flush=True)
+        except Exception:
+            pass
 
     def heartbeat(self):
         self.beat = time.monotonic()
