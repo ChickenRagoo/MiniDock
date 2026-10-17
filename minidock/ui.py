@@ -162,7 +162,10 @@ class VSyncClock(QObject):
         self.timers.discard(t)
         if not self.timers:
             self.wake.clear()
-            self.backup.stop()
+            try:
+                self.backup.stop()
+            except RuntimeError:  # программа закрывается — запасной таймер уже удалён
+                pass
 
 
 _clock = None

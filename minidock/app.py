@@ -26,7 +26,7 @@ from .elevation import open_security
 from .ui import BACKGROUNDS, GLASS
 from .updater import Updater
 from .version import __version__
-from .winapi import (EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+from .winapi import (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
                      force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, set_window_shadows,
                      set_work_area, taskbar_windows, user32, window_monitor, window_shadows)
@@ -41,7 +41,7 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
             "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
-            "--test-minimize": "MiniDock_TestMinimize"}
+            "--test-minimize": "MiniDock_TestMinimize", "--test-launch": "MiniDock_TestLaunch"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -84,6 +84,8 @@ class App:
                                       (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
                                       (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
+
+        self._create_hook = None  # «окно создано» — только пока ждём запуска программы из дока (событий много)
 
         self.beat = time.monotonic()
         self.beat_timer = QTimer(interval=1000, timeout=self.heartbeat)
@@ -128,6 +130,14 @@ class App:
                   file=sys.stderr, flush=True)
         except Exception:
             pass
+
+    def want_create_events(self, on):
+        if on and self._create_hook is None:
+            self._create_hook = user32.SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_CREATE, None, self._hook_proc,
+                                                       0, 0, 0x0002) or None
+        elif not on and self._create_hook is not None:
+            user32.UnhookWinEvent(self._create_hook)
+            self._create_hook = None
 
     def heartbeat(self):
         self.beat = time.monotonic()
@@ -375,6 +385,11 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-launch":  # запустить Блокнот так же, как из дока, с анимацией из иконки (для проверки)
+            exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "notepad.exe")
+            self.dock.reveal(2.0)
+            self.animator.expect_launch(exe.lower(), self.dock.icon_screen_rect(None))
+            win32api.ShellExecute(0, "open", exe, None, None, 1)  # SW_SHOWNORMAL
         elif flag == "--test-minimize":
             # вывести Блокнот вперёд и через 0,8 с свернуть его так же, как кликом по иконке в доке (для проверки)
             found = []
@@ -526,6 +541,8 @@ class App:
                 self.animator.on_minimize_start(hwnd)
             elif event == EVENT_SYSTEM_MINIMIZEEND:
                 self.animator.on_minimize_end(hwnd)
+            elif event == EVENT_OBJECT_CREATE:
+                self.animator.on_create(hwnd)
             elif event == EVENT_OBJECT_SHOW:
                 self.animator.on_show(hwnd)
             elif event == EVENT_OBJECT_HIDE:

@@ -587,7 +587,9 @@ class WindowAnimator:
         QTimer.singleShot(50, refresh)
         return True
 
-    def _play_appear(self, hwnd, icon_rect, mode, duration):
+    def _play_appear(self, hwnd, icon_rect, mode, duration, front=False):
+        """Окно уже развёрнуто/показано, но невидимо: анимация из icon_rect, в конце окно становится видимым
+        (front — и выходит на передний план: только что запущенная из дока программа)."""
         self.ours.discard(hwnd)
         if not win32gui.IsWindow(hwnd):
             self.unhide(hwnd)
@@ -596,9 +598,13 @@ class WindowAnimator:
         # окно уже развёрнуто, но невидимо — снимаем его настоящий текущий вид
         snap = snapshot(hwnd) if g else None
         img = snap[0] if snap else None
-        if not g or not self.play(hwnd, img, g[0], icon_rect, g[1], reverse=True, duration=duration, mode=mode,
-                                  on_done=lambda: self.unhide(hwnd)):
+        def done():
             self.unhide(hwnd)
+            if front:
+                force_foreground(hwnd)
+        if not g or not self.play(hwnd, img, g[0], icon_rect, g[1], reverse=True, duration=duration, mode=mode,
+                                  on_done=done):
+            done()
 
     def on_minimize_end(self, hwnd):
         """Окно развернули не мы (системный Alt+Tab, клик по уведомлению) — всё равно анимируем."""
@@ -615,22 +621,65 @@ class WindowAnimator:
     def expect_launch(self, exe, icon_rect):
         if self.cfg["animations"] and self.cfg["open_animation"]:
             self.launches.append([exe or None, icon_rect, time.monotonic() + 15])
+            # окно программы спрячем уже при создании — до того, как Windows его покажет (иначе оно мелькает
+            # целиком на кадр-другой перед анимацией из иконки)
+            self.app.want_create_events(True)
+            QTimer.singleShot(15500, self._launches_expired)
 
-    def on_show(self, hwnd):
+    def _launches_expired(self):
         now = time.monotonic()
         self.launches = [x for x in self.launches if x[2] > now]
-        if not self.launches or user32.GetAncestor(hwnd, 2) != hwnd or not is_app_window(hwnd):
-            return
+        if not self.launches:
+            self.app.want_create_events(False)
+
+    def _launch_for(self, hwnd):
+        """Ожидаемый запуск, к которому относится окно hwnd, или None."""
+        now = time.monotonic()
+        self.launches = [x for x in self.launches if x[2] > now]
+        if not self.launches:
+            return None
         exe = window_exe(hwnd)
         sysroot = os.environ.get("SystemRoot", r"C:\Windows").lower()
         for entry in self.launches:
             want = entry[0]
             folder = os.path.dirname(want) + os.sep if want else ""
             if want is None or exe == want or (folder and not folder.startswith(sysroot) and exe.startswith(folder)):
-                self.launches.remove(entry)
-                if self.hide_for_animation(hwnd):
-                    QTimer.singleShot(110, lambda: self._play_appear(hwnd, entry[1], "scale", self.dur(0.38)))
+                return entry
+        return None
+
+    def on_create(self, hwnd):
+        """Создано окно: если это верхнее окно запускаемой из дока программы — сразу делаем его прозрачным."""
+        if not self.launches or user32.GetAncestor(hwnd, 2) != hwnd or hwnd in self.hidden:
+            return
+        try:
+            if win32gui.GetWindow(hwnd, win32con.GW_OWNER) or win32gui.IsWindowVisible(hwnd):
                 return
+            ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if ex & win32con.WS_EX_TOOLWINDOW and not ex & win32con.WS_EX_APPWINDOW:
+                return
+            if win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE) & win32con.WS_CHILD:
+                return
+        except Exception:
+            return
+        entry = self._launch_for(hwnd)
+        if entry is not None and entry[0] is not None:  # только когда точно знаем, какая программа запускается
+            self.hide_for_animation(hwnd)  # не её главное окно (служебное) — вернётся при показе или через 3 с
+
+    def on_show(self, hwnd):
+        if not self.launches or user32.GetAncestor(hwnd, 2) != hwnd:
+            return
+        if not is_app_window(hwnd):
+            if hwnd in self.hidden:  # спрятали при создании, а это не окно программы — вернуть как было
+                self.unhide(hwnd)
+            return
+        entry = self._launch_for(hwnd)
+        if entry is None:
+            return
+        self.launches.remove(entry)
+        if not self.launches:
+            self.app.want_create_events(False)
+        if self.hide_for_animation(hwnd):
+            QTimer.singleShot(110, lambda: self._play_appear(hwnd, entry[1], "scale", self.dur(0.38), front=True))
 
     # -- close
     def on_hide(self, hwnd):
