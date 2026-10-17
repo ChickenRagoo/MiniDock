@@ -372,6 +372,19 @@ def app_icon(app_id):
     return pix
 
 
+def sharp_icon(pix, side, dpr=1.0):
+    """Уменьшить большой значок (обычно 256 px) без «лесенки»: сжимаем вдвое за шаг, пока не дойдём до
+    нужного размера в физических пикселях, — один прыжок 256 → 20 сглаживание не вытягивает."""
+    target = max(1, round(side * dpr))
+    img = pix.toImage().convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    while img.width() >= target * 2 and img.height() >= target * 2:
+        img = img.scaled(img.width() // 2, img.height() // 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    img = img.scaled(target, target, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    out = QPixmap.fromImage(img)
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
 def blurred(img, size, radius=18):
     """Сильно размытая и затемнённая копия картинки (фон карточки плеера)."""
     small = img.scaled(max(size.width() // 6, 8), max(size.height() // 6, 8), Qt.KeepAspectRatioByExpanding,
@@ -506,7 +519,10 @@ class MediaCard(QWidget):
         self.layers = []   # [(инфо, обложка, размытый фон)] — старый слой гаснет, новый проступает
         self.fade = 1.0
         self.appear = 0.0
-        self.icon = app_icon(info["app"])
+        # у Spotify логотип уже нарисован на самой обложке — свой значок поверх него только мешает
+        self.icon = None if "spotify" in info["app"].lower() else app_icon(info["app"])
+        if self.icon is not None and not self.icon.isNull():
+            self.icon = sharp_icon(self.icon, 26, self.devicePixelRatioF())
         self.buttons = []
         for glyph, action in ((GLYPH_PREV, "prev"), (GLYPH_PLAY, "toggle"), (GLYPH_NEXT, "next")):
             b = QPushButton(glyph, self)
@@ -610,7 +626,7 @@ class MediaCard(QWidget):
         p.setOpacity(self.appear)
         art = QRectF(10, 10, self.H - 20, self.H - 20)
         if self.icon is not None and not self.icon.isNull():
-            p.drawPixmap(QRectF(art.right() - 30, art.bottom() - 30, 26, 26), self.icon, QRectF(self.icon.rect()))
+            p.drawPixmap(QPointF(art.right() - 30, art.bottom() - 30), self.icon)
         p.setPen(QColor(255, 255, 255, 40))
         p.setBrush(Qt.NoBrush)
         p.drawPath(rounded_path(QRectF(0, 0, self.width(), self.H), 12))
@@ -769,7 +785,7 @@ class VolumeFlyout(Flyout):
             icon = QLabel()
             pix = app_icon(a["exe"])
             if pix is not None and not pix.isNull():
-                icon.setPixmap(pix.scaled(20, 20, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                icon.setPixmap(sharp_icon(pix, 20, self.devicePixelRatioF()))
             icon.setFixedWidth(22)
             name = QLabel(os.path.splitext(a["name"])[0])
             name.setFixedWidth(110)
