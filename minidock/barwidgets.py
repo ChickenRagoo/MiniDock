@@ -20,7 +20,9 @@
         ("button", подпись, действие)          — кнопка: функция или адрес/путь (открывается в Windows)
         ("sep",)                               — разделитель
 """
+import datetime
 import importlib.util
+import json
 import os
 import sys
 import threading
@@ -173,7 +175,185 @@ class NetworkWidget(BarWidget):
         return rows
 
 
-BUILTIN = [SystemWidget, NetworkWidget]
+# Лимиты Claude берутся из status line Claude Code: он передаёт команде строки состояния поле rate_limits
+# (окна five_hour и seven_day: used_percentage и resets_at) — https://code.claude.com/docs/en/statusline.
+# Наш скрипт строки состояния сохраняет их в файл, виджет этот файл читает. Ни токенов, ни запросов в сеть.
+CLAUDE_USAGE = CFG_DIR / "claude_usage.json"
+CLAUDE_HOOK = CFG_DIR / "claude_statusline.ps1"
+CLAUDE_HOOK_MARK = "MiniDock/claude_statusline.ps1"
+CLAUDE_HOOK_PS1 = r"""# MiniDock: сохраняет лимиты Claude (rate_limits из status line Claude Code) для виджета верхней панели
+$ErrorActionPreference = 'SilentlyContinue'
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$d = [Console]::In.ReadToEnd() | ConvertFrom-Json
+$r = $d.rate_limits
+if ($r -and ($r.five_hour -or $r.seven_day)) {
+    $out = Join-Path $env:APPDATA 'MiniDock\claude_usage.json'
+    $tmp = "$out.$PID.tmp"
+    $obj = [ordered]@{ updated = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); rate_limits = $r }
+    [IO.File]::WriteAllText($tmp, ($obj | ConvertTo-Json -Depth 6 -Compress), (New-Object Text.UTF8Encoding $false))
+    Move-Item -Force -LiteralPath $tmp -Destination $out
+}
+$parts = @()
+if ($d.model.display_name) { $parts += $d.model.display_name }
+if ($r.five_hour) { $parts += ('5ч {0}%' -f [math]::Round($r.five_hour.used_percentage)) }
+if ($r.seven_day) { $parts += ('нед {0}%' -f [math]::Round($r.seven_day.used_percentage)) }
+$parts -join ' · '
+"""
+WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def _claude_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def _claude_settings():
+    """(путь к settings.json Claude Code, его содержимое | None, если файл не читается как JSON)."""
+    path = os.path.join(_claude_dir(), "settings.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return path, json.load(f)
+    except FileNotFoundError:
+        return path, {}
+    except (OSError, ValueError):
+        return path, None
+
+
+def _claude_hook_state():
+    """"ours" — наш скрипт подключён, "other" — у Claude Code своя строка состояния, "none", "broken"."""
+    _, s = _claude_settings()
+    if s is None:
+        return "broken"
+    cmd = (s.get("statusLine") or {}).get("command", "") if isinstance(s.get("statusLine"), dict) else ""
+    if not cmd:
+        return "none"
+    return "ours" if CLAUDE_HOOK_MARK in cmd.replace("\\", "/") else "other"
+
+
+def _write_json(path, data):
+    tmp = f"{path}.minidock.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def claude_connect():
+    """Подключает скрипт MiniDock строкой состояния Claude Code (если своей там нет)."""
+    path, s = _claude_settings()
+    if s is None or _claude_hook_state() == "other":
+        return
+    CFG_DIR.mkdir(parents=True, exist_ok=True)
+    CLAUDE_HOOK.write_text(CLAUDE_HOOK_PS1, encoding="utf-8-sig")  # BOM — иначе PowerShell 5 не поймёт кириллицу
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    s["statusLine"] = {"type": "command", "command": "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                                                     f"-File \"{str(CLAUDE_HOOK).replace(os.sep, '/')}\""}
+    _write_json(path, s)
+
+
+def claude_disconnect():
+    path, s = _claude_settings()
+    if s and _claude_hook_state() == "ours":
+        del s["statusLine"]
+        _write_json(path, s)
+
+
+def _until(ts):
+    left = int(ts - time.time())
+    if left <= 0:
+        return "сейчас"
+    d, left = divmod(left, 86400)
+    h, left = divmod(left, 3600)
+    m = left // 60
+    if d:
+        return f"{d} д {h} ч"
+    return f"{h} ч {m} мин" if h else f"{max(m, 1)} мин"
+
+
+def _at(ts):
+    t = datetime.datetime.fromtimestamp(ts)
+    today = datetime.date.today()
+    if t.date() == today:
+        return t.strftime("%H:%M")
+    if t.date() == today + datetime.timedelta(days=1):
+        return "завтра " + t.strftime("%H:%M")
+    return f"{WEEKDAYS[t.weekday()]} {t.day:02d}.{t.month:02d} {t:%H:%M}"
+
+
+class ClaudeWidget(BarWidget):
+    id = "claude"
+    name = "Claude — лимиты на 5 часов и неделю"
+    icon = ""  # спидометр
+    interval = 10.0
+
+    WINDOWS = (("five_hour", "5ч", "Сессия (5 часов)"), ("seven_day", "нед", "Неделя"))
+
+    def update(self, detailed):
+        hook = _claude_hook_state()
+        data = dict(hook=hook, claude=os.path.isdir(_claude_dir()), windows={}, updated=None)
+        try:
+            with open(CLAUDE_USAGE, encoding="utf-8-sig") as f:
+                saved = json.load(f)
+        except FileNotFoundError:
+            return data
+        except (OSError, ValueError):
+            data["bad_file"] = True
+            return data
+        now = time.time()
+        limits = saved.get("rate_limits") or {}
+        for key, _, _ in self.WINDOWS:
+            w = limits.get(key)
+            if not isinstance(w, dict) or w.get("used_percentage") is None:
+                continue
+            resets = float(w.get("resets_at") or 0)
+            used = float(w["used_percentage"])
+            if resets and resets <= now:
+                used, resets = 0.0, 0.0  # окно уже сбросилось, а Claude Code с тех пор не запускали
+            data["windows"][key] = (max(0.0, used), resets)
+        data["updated"] = saved.get("updated")
+        return data
+
+    def text(self, d):
+        parts = [f"{short} {d['windows'][k][0]:.0f}%" for k, short, _ in self.WINDOWS if k in d["windows"]]
+        return " · ".join(parts) if parts else "Claude"
+
+    def panel(self, d):
+        rows = [("title", "Лимиты Claude")]
+        for key, _, label in self.WINDOWS:
+            if key not in d["windows"]:
+                continue
+            used, resets = d["windows"][key]
+            rows.append(("bar", label, used / 100, f"{used:.0f}%"))
+            rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)) if resets
+                        else ("value", "Сброс", "уже был"))
+        if d["windows"]:
+            age = time.time() - float(d["updated"] or 0)
+            ago = "только что" if age < 90 else f"{_until(time.time() + age)} назад"
+            rows += [("sep",), ("text", f"Данные из Claude Code, обновлены {ago}")]
+        elif d.get("bad_file"):
+            rows.append(("text", "Файл с лимитами повреждён — обновится при следующем ответе Claude"))
+        elif not d["claude"]:
+            rows.append(("text", "Claude Code на этом компьютере не найден"))
+        hook = d["hook"]
+        if hook == "ours" and not d["windows"]:
+            rows += [("text", "Подключено. Цифры появятся после первого ответа"),
+                     ("text", "Claude Code (нужна подписка Pro или Max)")]
+        elif hook == "none" and d["claude"]:
+            rows += [("text", "Лимиты передаёт строка состояния Claude Code."),
+                     ("text", "MiniDock подключит к ней свой короткий скрипт."),
+                     ("button", "Подключить к Claude Code", claude_connect)]
+        elif hook == "other":
+            rows += [("text", "У Claude Code уже настроена своя строка состояния —"),
+                     ("text", "MiniDock не стал её заменять (statusLine в settings.json)")]
+        elif hook == "broken":
+            rows.append(("text", "Не удалось прочитать settings.json Claude Code"))
+        rows.append(("button", "Лимиты на claude.ai…", "https://claude.ai/settings/usage"))
+        if hook == "ours":
+            rows.append(("button", "Отключить от Claude Code", claude_disconnect))
+        return rows
+
+
+BUILTIN = [SystemWidget, NetworkWidget, ClaudeWidget]
 
 
 # -- свои виджеты из папки ------------------------------------------------------------------------

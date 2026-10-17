@@ -152,9 +152,11 @@ class GpuGenie:
         self.place()
         self.timer = precise_timer(None, 6, self.step)
         self.enabled = True
-        self.swaps = 0        # кадров, выведенных на экран (считает поток рендера)
+        self.swaps = 0        # кадров, выведенных на экран
         self.waiters = []     # [номер кадра, колбэк] — «когда анимация уже видна на экране»
-        self.win.frameSwapped.connect(self._swapped, Qt.DirectConnection)
+        # Счёт кадров — через очередь событий, а не прямо в потоке рендера: иначе поток рендера ждёт Python (GIL),
+        # пока основной поток с GIL ждёт поток рендера в win.hide() — взаимная блокировка, MiniDock намертво зависал.
+        self.win.frameSwapped.connect(self._swapped, Qt.QueuedConnection)
         self.win.show()  # окно постоянно открыто и прозрачно: первая анимация не ждёт создания swapchain
 
     def _swapped(self):

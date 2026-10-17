@@ -83,8 +83,9 @@ class App:
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
 
         self.beat = time.monotonic()
-        self.beat_timer = QTimer(interval=1000, timeout=lambda: setattr(self, "beat", time.monotonic()))
+        self.beat_timer = QTimer(interval=1000, timeout=self.heartbeat)
         self.beat_timer.start()
+        self.heartbeat()
         threading.Thread(target=self.watchdog, daemon=True, name="MiniDockWatchdog").start()
         self.poll_timer = QTimer(interval=1000, timeout=self.poll)
         self.poll_timer.start()
@@ -96,6 +97,16 @@ class App:
         self.waiter.fired.connect(self.on_command)
         self.poll()
         self.bar.on_foreground(win32gui.GetForegroundWindow())
+
+    def heartbeat(self):
+        self.beat = time.monotonic()
+        # Второй сторож — внутри Python на C: срабатывает, даже если зависший вызов держит GIL и поток
+        # watchdog() стоит вместе со всеми. Каждую секунду переводим его на 30 с вперёд.
+        if sys.stderr is not None:
+            try:
+                faulthandler.dump_traceback_later(30, file=sys.stderr)
+            except Exception:
+                pass
 
     def watchdog(self):
         """Интерфейс не отвечает больше 20 с — записываем в журнал, чем заняты все потоки (один раз)."""
@@ -484,12 +495,14 @@ def take_over(mutex):
     import psutil
     me = os.getpid()
     mine = os.path.normcase(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]))
-    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "exe", "cmdline", "cwd"]):
         try:
             if proc.info["pid"] == me:
                 continue
             exe = os.path.normcase(proc.info["exe"] or "")
-            cmd = [os.path.normcase(os.path.abspath(c)) for c in (proc.info["cmdline"] or [])[1:2]]
+            # путь к скрипту в командной строке бывает относительным — считаем его от папки того процесса
+            cwd = proc.info["cwd"] or ""
+            cmd = [os.path.normcase(os.path.abspath(os.path.join(cwd, c))) for c in (proc.info["cmdline"] or [])[1:2]]
             if exe == mine or mine in cmd:
                 proc.kill()
         except (psutil.Error, OSError, ValueError):
