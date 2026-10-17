@@ -220,7 +220,7 @@ class Switcher(QWidget):
         self.win_mode = False  # стрелки выбирают окна, а не приложения
         self.hover = None      # приложение под мышью: его окна показаны, но выбор (для Alt) не меняется
         self.hover_win = None  # миниатюра под мышью
-        self.hl = 0.0        # анимированная позиция подсветки
+        self.hl = None       # анимированная позиция подсветки (QPointF)
         self.active = False
         self.icons = {}
         self.font_name = QFont("Segoe UI", 10, QFont.DemiBold)
@@ -284,8 +284,17 @@ class Switcher(QWidget):
         return self.hover if self.hover is not None and self.hover < len(self.apps) else self.index
 
     # -- geometry
-    def cell(self):
+    def cols(self):
+        """Сколько иконок в ряду: настройка «в одной строке» (0 — все в один ряд)."""
         n = max(len(self.apps), 1)
+        per = int(self.cfg.get("switcher_per_row", 0) or 0)
+        return min(n, per) if per > 0 else n
+
+    def grid_rows(self):
+        return -(-max(len(self.apps), 1) // self.cols())
+
+    def cell(self):
+        n = self.cols()
         scr = QApplication.primaryScreen().geometry()
         want = float(self.cfg["switcher_icon"])
         gap = want * 0.15
@@ -304,10 +313,15 @@ class Switcher(QWidget):
             return 0.0
         return self.preview_height() + 6 + 18 + 12  # миниатюры + подпись + отступ до иконок
 
-    def icons_width(self):
+    def icons_width(self, n=None):
         size, gap, pad = self.cell()
-        n = len(self.apps)
+        n = self.cols() if n is None else n
         return n * size + (n - 1) * gap
+
+    def icons_height(self):
+        size, gap, pad = self.cell()
+        rows = self.grid_rows()
+        return rows * size + (rows - 1) * gap * 1.6
 
     def place(self):
         """Размер окна фиксируется на всё нажатие Alt (самый широкий ряд окон среди приложений):
@@ -322,15 +336,19 @@ class Switcher(QWidget):
                 widths = a["row"][0]
                 w = max(w, sum(widths) + self.PREVIEW_GAP * (len(widths) - 1))
         w += pad * 2
-        h = size + pad * 2 + self.text_height() + self.previews_height()
+        h = self.icons_height() + pad * 2 + self.text_height() + self.previews_height()
         scr = QApplication.primaryScreen().geometry()
         y = scr.center().y() - h / 2 if self.cfg["switcher_position"] == "center" else scr.top() + scr.height() * 0.22
         self.setGeometry(int(scr.center().x() - w / 2), int(y), int(w), int(h))
 
     def icon_rect(self, i):
+        """Иконки рядами по «в одной строке»; неполный последний ряд — по центру."""
         size, gap, pad = self.cell()
-        x0 = (self.width() - self.icons_width()) / 2
-        return QRectF(x0 + i * (size + gap), self.icons_top(), size, size)
+        cols = self.cols()
+        row, col = divmod(i, cols)
+        in_row = min(cols, len(self.apps) - row * cols)
+        x0 = (self.width() - self.icons_width(in_row)) / 2
+        return QRectF(x0 + col * (size + gap), self.icons_top() + row * (size + gap * 1.6), size, size)
 
     def icons_top(self):
         """Иконки — под рядом миниатюр окон (миниатюры сверху)."""
@@ -373,7 +391,7 @@ class Switcher(QWidget):
         self.index = (1 if direction > 0 else -1) % len(self.apps) if len(self.apps) > 1 else 0
         self.win_index, self.win_mode = 0, False
         self.hover = self.hover_win = None
-        self.hl = float(self.index)
+        self.hl = None       # подсветка сразу встаёт на выбранное
         self.active = True
         # короткое Alt+Tab переключает без вспышки окна
         QTimer.singleShot(int(self.cfg["switcher_delay"]), self.show_if_active)
@@ -476,7 +494,7 @@ class Switcher(QWidget):
             return
         self.index %= len(self.apps)
         self.win_index, self.win_mode = 0, False
-        self.hl = min(self.hl, len(self.apps) - 1)
+        self.hl = None
         self.update_thumbs()
 
     # -- painting
@@ -485,11 +503,17 @@ class Switcher(QWidget):
         fade_in(self)
 
     def tick(self):
-        if abs(self.hl - self.index) < 0.01:
-            self.hl = float(self.index)
+        """Подсветка плавно едет к выбранной иконке (и между рядами тоже)."""
+        target = self.icon_rect(self.index).topLeft() if self.apps else None
+        if target is None or self.hl is None:
+            self.hl = target
+            self.anim.stop()
+        elif abs(self.hl.x() - target.x()) + abs(self.hl.y() - target.y()) < 0.5:
+            self.hl = target
             self.anim.stop()
         else:
-            self.hl = lerp(self.hl, self.index, smooth(0.35, self.anim.dt))
+            k = smooth(0.35, self.anim.dt)
+            self.hl = QPointF(lerp(self.hl.x(), target.x(), k), lerp(self.hl.y(), target.y(), k))
         self.update()
 
     def paintEvent(self, _):
@@ -505,8 +529,9 @@ class Switcher(QWidget):
             return
         size, gap, pad = self.cell()
         m = size * 0.08
-        x0 = (self.width() - self.icons_width()) / 2
-        hl = QRectF(x0 + self.hl * (size + gap), self.icons_top(), size, size).adjusted(-m, -m, m, m)
+        if self.hl is None:
+            self.hl = self.icon_rect(self.index).topLeft()
+        hl = QRectF(self.hl.x(), self.hl.y(), size, size).adjusted(-m, -m, m, m)
         hp = QPainterPath()
         hp.addRoundedRect(hl, size * 0.16, size * 0.16)
         p.fillPath(hp, QColor(255, 255, 255, 30 if self.win_mode else 48))
@@ -525,7 +550,7 @@ class Switcher(QWidget):
         a = self.apps[self.shown()]
         if self.cfg["switcher_titles"]:
             fm = QFontMetricsF(self.font_name)
-            y = self.icons_top() + size + 10
+            y = self.icons_top() + self.icons_height() + 10
             p.setFont(self.font_name)
             p.setPen(QColor(245, 245, 248))
             p.drawText(QRectF(8, y, self.width() - 16, fm.height()), Qt.AlignCenter,
@@ -644,14 +669,16 @@ class WinSwitcher(QWidget):
         return float(self.cfg["switcher_preview"]) * 0.5625 * 1.15
 
     def place(self):
-        """Окна раскладываются рядами (до 4), каждый ряд — не шире экрана."""
+        """Окна раскладываются рядами (до 4 или по настройке «в одной строке»), каждый ряд — не шире экрана."""
         scr = QApplication.primaryScreen().geometry()
         max_w = scr.width() - 200
         hwnds = [h for h, _ in self.wins]
         self.pad = max(16.0, float(self.cfg["switcher_radius"]))
         layout = []
-        for rows in range(1, 5):
-            per = -(-len(hwnds) // rows)
+        limit = int(self.cfg.get("switcher_per_row", 0) or 0)  # «в одной строке»: 0 — сколько влезет
+        first = -(-len(hwnds) // limit) if limit > 0 else 1
+        for rows in range(first, max(first, 4) + 1):
+            per = min(-(-len(hwnds) // rows), limit) if limit > 0 else -(-len(hwnds) // rows)
             chunks = [list(range(i, min(i + per, len(hwnds)))) for i in range(0, len(hwnds), per)]
             layout = [(idx, *row_layout([hwnds[i] for i in idx], self.tile_height(), self.GAP, max_w))
                       for idx in chunks]

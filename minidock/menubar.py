@@ -57,6 +57,8 @@ class MenuBar(QWidget):
         except Exception:
             pass
         self._state = None
+        self.widget_w = {}  # ширина надписи виджета: (ширина, когда задана)
+        app.widgets.changed.connect(self.update)
         self._battery = (0.0, None)  # (когда читали, значение) — заряд меняется медленно
         # часы обновляются раз в секунду ровно на границе секунды (а не 4 раза в секунду)
         self.timer = QTimer(self, singleShot=True, timeout=self.on_second)
@@ -232,7 +234,28 @@ class MenuBar(QWidget):
                   ("icon", "", WifiFlyout, "net"),
                   ("icon", "", lambda r: self.app.spotlight.toggle(), "search"),
                   ("icon", "", TrayFlyout, "tray")]
+        host = self.app.widgets
+        for wid in reversed(host.enabled()):  # виджеты — левее системных значков, в порядке включения
+            items.append(("widget", host.bar_text(wid), (lambda r, wid=wid: self.toggle_widget(wid, r)), "w:" + wid))
         for kind, text, action, key in items:
+            if kind == "widget":
+                glyph = host.classes[key[2:]].icon if key[2:] in host.classes else ""
+                gw = QFontMetricsF(self.f_icon).horizontalAdvance(glyph) + 6 if glyph else 0
+                # ширина растёт сразу, а сужается не раньше чем через несколько секунд — надпись не «дёргается»
+                tw = QFontMetricsF(self.f_mono).horizontalAdvance(text)
+                keep = self.widget_w.get(key)
+                if keep is None or tw > keep[0] or time.monotonic() - keep[1] > 4:
+                    keep = self.widget_w[key] = (tw, time.monotonic())
+                w = gw + keep[0] + 18
+                x -= w
+                r = add(x, w, action, key)
+                p.setPen(QColor(245, 245, 248))
+                if glyph:
+                    p.setFont(self.f_icon)
+                    p.drawText(QRectF(r.left() + 9, r.top(), gw, r.height()), Qt.AlignLeft | Qt.AlignVCenter, glyph)
+                p.setFont(self.f_mono)
+                p.drawText(QRectF(r.left() + 9 + gw, r.top(), keep[0], r.height()), Qt.AlignCenter, text)
+                continue
             f = self.f_icon if kind == "icon" else self.f_mono if kind == "clock" else self.f_reg
             w = QFontMetricsF(f).horizontalAdvance(text) + 18
             if kind == "clock":  # ширина часов не меняется каждую секунду
@@ -286,6 +309,16 @@ class MenuBar(QWidget):
             fly = self.flyouts[cls] = cls(self)
         self.open_flyout = fly
         self.active = key
+        fly.open_under(self.global_rect(r))
+
+    def toggle_widget(self, wid, r):
+        from .barwidgets import WidgetFlyout
+        key = ("widget", wid)
+        fly = self.flyouts.get(key)
+        if fly is None:
+            fly = self.flyouts[key] = WidgetFlyout(self, self.app.widgets, wid)
+        self.open_flyout = fly
+        self.active = "w:" + wid
         fly.open_under(self.global_rect(r))
 
     def flyout_closed(self, fly):

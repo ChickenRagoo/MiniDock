@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QFrame, QH
                                QMessageBox, QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from . import elevation
+from .barwidgets import WIDGETS_DIR
 from .config import CFG_DIR, DEFAULT_CFG
 from .updater import PAGE
 from .version import __version__
@@ -234,7 +235,7 @@ class SettingsWindow(QWidget):
         c.currentIndexChanged.connect(lambda i: self.app.set_cfg(key, c.itemData(i)))
         return self.row(title, c, desc)
 
-    def color(self, key, title):
+    def color(self, key, title, dialog_title="Цвет фона дока"):
         b = QPushButton()
         b.setFixedSize(46, 24)
 
@@ -243,7 +244,7 @@ class SettingsWindow(QWidget):
                             f"border-radius: 6px;")
 
         def pick():
-            c = QColorDialog.getColor(QColor(self.cfg[key]), self, "Цвет фона дока")
+            c = QColorDialog.getColor(QColor(self.cfg[key]), self, dialog_title)
             if c.isValid():
                 self.app.set_cfg(key, c.name())
                 paint()
@@ -392,6 +393,19 @@ class SettingsWindow(QWidget):
             self.toggle("clock_date", "Дата рядом с часами"),
             self.toggle("show_battery", "Заряд аккумулятора", "Только на ноутбуках."),
         ])
+        self.widgets_box = QVBoxLayout()
+        self.widgets_box.setContentsMargins(0, 0, 0, 0)
+        holder = QWidget()
+        holder.setLayout(self.widgets_box)
+        lay.addWidget(QLabel("Виджеты"))
+        lay.addWidget(holder)
+        self.fill_widgets()
+        self.app.widgets.listed.connect(self.fill_widgets)
+        self.group(lay, [
+            self.combo("media_bg", "Фон карточек плееров в окне звука",
+                       [("Размытая обложка", "blur"), ("Сплошной цвет", "solid")]),
+            self.color("media_color", "Цвет фона карточек", "Цвет фона карточек плееров"),
+        ])
         lay.addStretch()
         return w
 
@@ -413,6 +427,7 @@ class SettingsWindow(QWidget):
         ])
         self.group(lay, [
             self.slider("switcher_icon", "Размер иконок", 48, 160, fmt="{:.0f} px"),
+            self.per_row_slider(),
             self.slider("switcher_opacity", "Непрозрачность фона", 0, 255, fmt="{:.0f}"),
             self.slider("switcher_radius", "Скругление углов", 0, 40, fmt="{:.0f} px"),
             self.combo("switcher_position", "Положение", [("По центру экрана", "center"),
@@ -431,6 +446,51 @@ class SettingsWindow(QWidget):
         ])
         lay.addStretch()
         return w
+
+    def fill_widgets(self):
+        """Список виджетов верхней панели: встроенные и свои из папки widgets."""
+        while self.widgets_box.count():
+            item = self.widgets_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        host = self.app.widgets
+        on = set(host.enabled())
+        rows = []
+        for wid, name in host.available():
+            t = Toggle(wid in on)
+            t.toggled.connect(lambda v, wid=wid: (host.set_enabled(wid, v), self.app.save_soon()))
+            rows.append(self.row(name, t))
+        tools = QHBoxLayout()
+        tools.addWidget(self.button("Открыть папку", lambda: os.startfile(str(WIDGETS_DIR))))
+        tools.addWidget(self.button("Перезагрузить", host.reload))
+        desc = ("Клик по виджету на панели открывает подробности. Свои виджеты — файлы .py в папке виджетов: "
+                "там лежит пример с описанием.")
+        if host.errors:
+            desc += "\n\nНе загрузились:\n" + "\n".join(host.errors)
+        rows.append(self.row("Свои виджеты", tools, desc))
+        frame = QFrame()
+        frame.setObjectName("group")
+        gl = QVBoxLayout(frame)
+        gl.setContentsMargins(14, 6, 14, 6)
+        gl.setSpacing(0)
+        for i, row in enumerate(rows):
+            if i:
+                line = QFrame()
+                line.setObjectName("line")
+                gl.addWidget(line)
+            gl.addWidget(row)
+        self.widgets_box.addWidget(frame)
+
+    def per_row_slider(self):
+        """«В одной строке»: 0 показываем как «Все» — ряд не переносится."""
+        row = self.slider("switcher_per_row", "Иконок и окон в одной строке", 0, 20, fmt="{:.0f}",
+                          desc="Сколько иконок (или миниатюр во втором стиле) помещается в ряд, остальные — "
+                               "на следующей строке. 0 — все в один ряд.")
+        val = row.findChild(QLabel, "value")
+        fix = lambda: val.setText("Все" if val.text() == "0" else val.text())
+        row.findChild(QSlider).valueChanged.connect(lambda _: fix())
+        fix()
+        return row
 
     def button_row(self, title, text, cb, desc=None):
         return self.row(title, self.button(text, cb), desc)

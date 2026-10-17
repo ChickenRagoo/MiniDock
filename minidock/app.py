@@ -17,6 +17,7 @@ from .animations import WindowAnimator
 from .config import load_cfg, save_cfg
 from .dock import Dock
 from .launchpad import Launchpad
+from .barwidgets import WidgetHost
 from .menubar import MenuBar
 from .previews import WindowPreview
 from .spotlight import Spotlight
@@ -58,6 +59,7 @@ class App:
         self.animator = WindowAnimator(self)
         self.preview = WindowPreview(self)
         self.dock = Dock(self)
+        self.widgets = WidgetHost(self.cfg)
         self.bar = MenuBar(self)
         self.extra_bars = {}  # имя монитора -> панель на дополнительном мониторе
         self.extra_docks = {}  # имя монитора -> док на дополнительном мониторе

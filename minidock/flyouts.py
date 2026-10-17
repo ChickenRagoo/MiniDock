@@ -385,6 +385,28 @@ def sharp_icon(pix, side, dpr=1.0):
     return out
 
 
+def trim_cover(img):
+    """Обложка без прозрачных полей. Spotify отдаёт картинку 300×300: сама обложка сверху посередине,
+    под ней — его логотип на прозрачном фоне. Оставляем только непрозрачный прямоугольник обложки,
+    чтобы карточки всех плееров выглядели одинаково."""
+    if img.isNull() or not img.hasAlphaChannel():
+        return img
+    a = img.convertToFormat(QImage.Format_ARGB32)
+    w, h = a.width(), a.height()
+    alpha = np.frombuffer(a.constBits(), np.uint8, a.bytesPerLine() * h).reshape(h, a.bytesPerLine() // 4, 4)[:, :w, 3]
+    solid = alpha > 200
+    rows = np.where(solid.mean(1) > 0.5)[0]
+    if not len(rows):
+        return img
+    # первый сплошной блок строк сверху — это обложка, всё, что ниже пустой полосы, — логотип
+    gaps = np.where(np.diff(rows) > 1)[0]
+    top, bottom = rows[0], rows[gaps[0]] if len(gaps) else rows[-1]
+    cols = np.where(solid[top:bottom + 1].mean(0) > 0.9)[0]
+    if not len(cols) or (bottom - top + 1) * len(cols) < w * h * 0.25:
+        return img
+    return img.copy(int(cols[0]), int(top), int(cols[-1] - cols[0] + 1), int(bottom - top + 1))
+
+
 def blurred(img, size, radius=18):
     """Сильно размытая и затемнённая копия картинки (фон карточки плеера)."""
     small = img.scaled(max(size.width() // 6, 8), max(size.height() // 6, 8), Qt.KeepAspectRatioByExpanding,
@@ -510,7 +532,7 @@ class MediaCard(QWidget):
     Новые данные (другой трек) плавно проступают поверх старых — карточка не пересоздаётся."""
     H = 122
 
-    def __init__(self, info, watcher):
+    def __init__(self, info, watcher, cfg):
         super().__init__()
         self.watcher = watcher
         self.setFixedHeight(0)  # появляется, плавно раскрываясь
@@ -519,8 +541,8 @@ class MediaCard(QWidget):
         self.layers = []   # [(инфо, обложка, размытый фон)] — старый слой гаснет, новый проступает
         self.fade = 1.0
         self.appear = 0.0
-        # у Spotify логотип уже нарисован на самой обложке — свой значок поверх него только мешает
-        self.icon = None if "spotify" in info["app"].lower() else app_icon(info["app"])
+        self.cfg = cfg
+        self.icon = app_icon(info["app"])
         if self.icon is not None and not self.icon.isNull():
             self.icon = sharp_icon(self.icon, 26, self.devicePixelRatioF())
         self.buttons = []
@@ -538,7 +560,7 @@ class MediaCard(QWidget):
         key = (info["title"], info["artist"], bool(info["cover"]))
         if self.layers and self.layers[-1][0] == key:
             return
-        cover = QImage.fromData(info["cover"]) if info["cover"] else QImage()
+        cover = trim_cover(QImage.fromData(info["cover"])) if info["cover"] else QImage()
         self.layers = self.layers[-1:] + [(key, info, cover, None)]
         if not animated or len(self.layers) == 1:
             self.layers = self.layers[-1:]
@@ -579,7 +601,9 @@ class MediaCard(QWidget):
         card = rounded_path(QRectF(0, 0, self.width(), self.H), 12)
         p.save()
         p.setClipPath(card)
-        if not cover.isNull():
+        if self.cfg.get("media_bg", "blur") == "solid":  # фон карточки — сплошной цвет из настроек
+            p.fillRect(self.rect(), QColor(self.cfg.get("media_color", "#26262e")))
+        elif not cover.isNull():
             if bg is None:
                 bg = blurred(cover, QSize(self.width(), self.H))
                 self.layers[i] = (key, info, cover, bg)
@@ -903,7 +927,7 @@ class VolumeFlyout(Flyout):
         return (s["app"], s["id"])
 
     def add_card(self, s, animated=True):
-        card = MediaCard(s, self.watcher)
+        card = MediaCard(s, self.watcher, self.bar.cfg)
         before = self.content_height() if animated else 0
         self.cards[self.card_key(s)] = card
         self.media_box.addWidget(card)
