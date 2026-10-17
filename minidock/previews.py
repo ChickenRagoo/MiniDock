@@ -248,6 +248,8 @@ class WindowPreview(QWidget):
         self.hide_timer = QTimer(self, singleShot=True, interval=280, timeout=self._hide_if_away)
         # наведение на миниатюру ненадолго — окно показывается целиком на своём месте (как в Windows)
         self.peek_timer = QTimer(self, singleShot=True, interval=450, timeout=self._start_peek)
+        # пока предпросмотр открыт — следим, не закрылись ли его окна (из меню дока, самим приложением, Alt+F4)
+        self.watch_timer = QTimer(self, interval=250, timeout=self._watch_windows)
         self.peeking = None      # окно, которое сейчас показано целиком
         self.peek_target = None  # окно под мышью, ждёт задержку
         self.pending = None
@@ -336,6 +338,7 @@ class WindowPreview(QWidget):
     def close_preview(self):
         self.show_timer.stop()
         self.hide_timer.stop()
+        self.watch_timer.stop()
         self.stop_peek()
         self.thumbs.hide()
         self.hide()
@@ -343,6 +346,7 @@ class WindowPreview(QWidget):
 
     def showEvent(self, e):
         fade_in(self)
+        self.watch_timer.start()
 
     def hideEvent(self, e):
         self.thumbs.hide()
@@ -445,10 +449,22 @@ class WindowPreview(QWidget):
         else:
             force_foreground(hwnd)
 
+    @staticmethod
+    def _alive(hwnd):
+        return win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd)
+
+    def _watch_windows(self):
+        if not self.isVisible():
+            self.watch_timer.stop()
+        elif not all(self._alive(h) for h in self.hwnds):
+            self.refresh_after_close()
+
     def refresh_after_close(self):
         if not self.isVisible() or self.item is None:
             return
-        self.hwnds = [h for h in self.hwnds if win32gui.IsWindow(h)]
+        if self.peeking is not None and not self._alive(self.peeking):
+            self.stop_peek()
+        self.hwnds = [h for h in self.hwnds if self._alive(h)]
         if not self.hwnds:
             self.close_preview()
             return

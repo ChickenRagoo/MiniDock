@@ -39,7 +39,7 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
-            "--test-peek": "MiniDock_TestPeek"}
+            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -343,6 +343,14 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-clock":  # открыть календарь под часами (для проверки)
+            from PySide6.QtCore import QRectF as _R
+            from .flyouts import ClockFlyout
+            fly = self.bar.flyouts.get(ClockFlyout)
+            if fly is not None and fly.isVisible():
+                fly.close()
+            else:
+                self.bar.toggle_flyout(ClockFlyout, "clock", _R(self.bar.width() - 160, 0, 150, self.bar.H))
         elif flag == "--test-peek":
             # миниатюры первого запущенного приложения, через секунду — его первое окно целиком, ещё через 2 с — выход
             self.on_command("--test-preview")
