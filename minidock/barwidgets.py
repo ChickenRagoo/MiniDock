@@ -280,76 +280,237 @@ def _at(ts):
     return f"{WEEKDAYS[t.weekday()]} {t.day:02d}.{t.month:02d} {t:%H:%M}"
 
 
+def _tokens(n):
+    if n >= 1e9:
+        return f"{n / 1e9:.1f} млрд".replace(".", ",")
+    if n >= 1e6:
+        return f"{n / 1e6:.1f} млн".replace(".", ",")
+    if n >= 1e3:
+        return f"{n / 1e3:.0f} тыс"
+    return str(int(n))
+
+
+def _parse_ts(s):
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+class ClaudeLog:
+    """Расход Claude Code по его локальным журналам (~/.claude/projects/**/*.jsonl): у каждого ответа модели
+    там записано, сколько токенов ушло. Первый раз читаем журналы за 8 дней целиком, дальше — только
+    дописанное. Отказы «лимит исчерпан» (quotaLimits) дают точное время сброса и калибруют оценку."""
+    KEEP = 8 * 86400
+    BLOCK = 5 * 3600
+
+    def __init__(self):
+        self.offsets = {}   # путь -> сколько байт уже прочитано
+        self.msgs = {}      # id ответа -> (время, ввод, вывод, запись в кэш, чтение из кэша)
+        self.limits = []    # [(время отказа, тип окна, время сброса)]
+
+    def scan(self):
+        root = os.path.join(_claude_dir(), "projects")
+        horizon = time.time() - self.KEEP
+        for dirpath, _, files in os.walk(root):
+            for name in files:
+                if not name.endswith(".jsonl"):
+                    continue
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.stat(path)
+                except OSError:
+                    continue
+                if st.st_mtime < horizon:
+                    continue
+                start = self.offsets.get(path, 0)
+                if st.st_size < start:  # файл переписали — читаем заново
+                    start = 0
+                if st.st_size == start:
+                    continue
+                self.offsets[path] = self._read(path, start)
+                time.sleep(0)  # отдать GIL интерфейсу между файлами
+        self.msgs = {k: v for k, v in self.msgs.items() if v[0] >= horizon}
+        self.limits = [x for x in self.limits if x[0] >= horizon]
+
+    def _read(self, path, start):
+        with open(path, "rb") as f:
+            f.seek(start)
+            pos = start
+            for line in f:
+                if not line.endswith(b"\n"):
+                    break  # строку ещё дописывают — дочитаем в следующий раз
+                pos += len(line)
+                if b'"usage"' not in line and b"quotaLimits" not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                ts = _parse_ts(d.get("timestamp"))
+                if ts is None:
+                    continue
+                q = d.get("quotaLimits")
+                if isinstance(q, dict) and q.get("status") == "rejected" and q.get("resetsAt"):
+                    self.limits.append((ts, q.get("rateLimitType") or "", float(q["resetsAt"])))
+                msg = d.get("message")
+                u = msg.get("usage") if isinstance(msg, dict) else None
+                if not isinstance(u, dict) or d.get("isApiErrorMessage"):
+                    continue
+                key = msg.get("id") or d.get("requestId") or d.get("uuid")
+                self.msgs[key] = (ts, u.get("input_tokens") or 0, u.get("output_tokens") or 0,
+                                  u.get("cache_creation_input_tokens") or 0, u.get("cache_read_input_tokens") or 0)
+            return pos
+
+    @staticmethod
+    def weight(m):
+        """«Тяжёлые» токены: ввод, вывод и запись в кэш. Чтение из кэша почти не тратит лимит — его не считаем."""
+        return m[1] + m[2] + m[3]
+
+    def blocks(self):
+        """Окна по 5 часов, как их считает подписка: окно начинается с первого запроса (с точностью до часа)
+        после конца предыдущего. [(начало, конец, [ответы])]"""
+        out = []
+        for m in sorted(self.msgs.values()):
+            if not out or m[0] >= out[-1][1]:
+                start = m[0] - m[0] % 3600
+                out.append((start, start + self.BLOCK, []))
+            out[-1][2].append(m)
+        return out
+
+    def summary(self):
+        now = time.time()
+        blocks = self.blocks()
+        cur = blocks[-1] if blocks and blocks[-1][1] > now else None
+        # точное время сброса — из последнего отказа «лимит исчерпан», если он ещё в силе
+        hit5 = next((r for t, k, r in reversed(self.limits) if k == "five_hour" and r > now), None)
+        hit7 = next((r for t, k, r in reversed(self.limits) if k == "seven_day" and r > now), None)
+        # оценка лимита на 5 часов: сколько было потрачено в окне, которое упёрлось в лимит
+        cap = None
+        for t, kind, resets in reversed(self.limits):
+            if kind != "five_hour":
+                continue
+            used = sum(self.weight(m) for m in self.msgs.values() if resets - self.BLOCK <= m[0] <= t)
+            if used:
+                cap = used
+                break
+        done = [b for b in blocks if b is not cur]
+        record = max((sum(self.weight(m) for m in b[2]) for b in done), default=0)
+        week = [m for m in self.msgs.values() if m[0] >= now - 7 * 86400]
+        cur_msgs = cur[2] if cur else []
+        return dict(
+            five=sum(self.weight(m) for m in cur_msgs),
+            five_out=sum(m[2] for m in cur_msgs),
+            five_count=len(cur_msgs),
+            five_reset=hit5 or (cur[1] if cur else None),
+            five_hit=hit5 is not None,
+            cap=cap, record=record,
+            week=sum(self.weight(m) for m in week),
+            week_reads=sum(m[4] for m in week),
+            week_count=len(week),
+            week_reset=hit7, week_hit=hit7 is not None,
+        )
+
+
 class ClaudeWidget(BarWidget):
     id = "claude"
-    name = "Claude — лимиты на 5 часов и неделю"
-    icon = ""  # спидометр
-    interval = 10.0
+    name = "Claude — расход за 5 часов и неделю"
+    icon = ""  # спидометр
+    interval = 15.0
 
     WINDOWS = (("five_hour", "5ч", "Сессия (5 часов)"), ("seven_day", "нед", "Неделя"))
 
-    def update(self, detailed):
-        hook = _claude_hook_state()
-        data = dict(hook=hook, claude=os.path.isdir(_claude_dir()), windows={}, updated=None)
+    def __init__(self):
+        self.log = ClaudeLog()
+
+    def exact(self):
+        """Точные проценты из строки состояния терминального claude, если они свежие (не старше 15 мин)."""
         try:
             with open(CLAUDE_USAGE, encoding="utf-8-sig") as f:
                 saved = json.load(f)
-        except FileNotFoundError:
-            return data
         except (OSError, ValueError):
-            data["bad_file"] = True
-            return data
-        now = time.time()
-        limits = saved.get("rate_limits") or {}
+            return {}
+        if time.time() - float(saved.get("updated") or 0) > 900:
+            return {}
+        out = {}
         for key, _, _ in self.WINDOWS:
-            w = limits.get(key)
-            if not isinstance(w, dict) or w.get("used_percentage") is None:
-                continue
-            resets = float(w.get("resets_at") or 0)
-            used = float(w["used_percentage"])
-            if resets and resets <= now:
-                used, resets = 0.0, 0.0  # окно уже сбросилось, а Claude Code с тех пор не запускали
-            data["windows"][key] = (max(0.0, used), resets)
-        data["updated"] = saved.get("updated")
-        return data
+            w = (saved.get("rate_limits") or {}).get(key)
+            if isinstance(w, dict) and w.get("used_percentage") is not None:
+                resets = float(w.get("resets_at") or 0)
+                if not resets or resets > time.time():
+                    out[key] = (float(w["used_percentage"]), resets)
+        return out
+
+    def update(self, detailed):
+        if not os.path.isdir(_claude_dir()):
+            return dict(claude=False)
+        self.log.scan()
+        return dict(claude=True, est=self.log.summary(), exact=self.exact(), hook=_claude_hook_state())
 
     def text(self, d):
-        parts = [f"{short} {d['windows'][k][0]:.0f}%" for k, short, _ in self.WINDOWS if k in d["windows"]]
-        return " · ".join(parts) if parts else "Claude"
+        if not d.get("claude"):
+            return "Claude"
+        ex, e = d["exact"], d["est"]
+        if ex:
+            return " · ".join(f"{short} {ex[k][0]:.0f}%" for k, short, _ in self.WINDOWS if k in ex)
+        if e["five_hit"]:
+            five = "лимит"
+        elif e["cap"]:
+            five = f"≈{min(e['five'] / e['cap'] * 100, 100):.0f}%"
+        else:
+            five = _tokens(e["five"])
+        return f"5ч {five} · нед {_tokens(e['week'])}"
 
     def panel(self, d):
-        rows = [("title", "Лимиты Claude")]
-        for key, _, label in self.WINDOWS:
-            if key not in d["windows"]:
-                continue
-            used, resets = d["windows"][key]
-            rows.append(("bar", label, used / 100, f"{used:.0f}%"))
-            rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)) if resets
-                        else ("value", "Сброс", "уже был"))
-        if d["windows"]:
-            age = time.time() - float(d["updated"] or 0)
-            ago = "только что" if age < 90 else f"{_until(time.time() + age)} назад"
-            rows += [("sep",), ("text", f"Данные из Claude Code, обновлены {ago}")]
-        elif d.get("bad_file"):
-            rows.append(("text", "Файл с лимитами повреждён — обновится при следующем ответе Claude"))
-        elif not d["claude"]:
-            rows.append(("text", "Claude Code на этом компьютере не найден"))
-        hook = d["hook"]
-        if hook == "ours" and not d["windows"]:
-            rows += [("text", "Подключено. Цифры появятся после первого ответа"),
-                     ("text", "Claude Code (нужна подписка Pro или Max)")]
-        elif hook == "none" and d["claude"]:
-            rows += [("text", "Лимиты передаёт строка состояния Claude Code."),
-                     ("text", "MiniDock подключит к ней свой короткий скрипт."),
-                     ("button", "Подключить к Claude Code", claude_connect)]
-        elif hook == "other":
-            rows += [("text", "У Claude Code уже настроена своя строка состояния —"),
-                     ("text", "MiniDock не стал её заменять (statusLine в settings.json)")]
-        elif hook == "broken":
-            rows.append(("text", "Не удалось прочитать settings.json Claude Code"))
-        rows.append(("button", "Лимиты на claude.ai…", "https://claude.ai/settings/usage"))
-        if hook == "ours":
-            rows.append(("button", "Отключить от Claude Code", claude_disconnect))
+        rows = [("title", "Расход Claude")]
+        if not d.get("claude"):
+            return rows + [("text", "Claude Code на этом компьютере не найден"),
+                           ("button", "Лимиты на claude.ai…", "https://claude.ai/settings/usage")]
+        ex, e = d["exact"], d["est"]
+        # окно 5 часов
+        if "five_hour" in ex:
+            used = ex["five_hour"][0]
+            rows.append(("bar", "Сессия (5 часов)", used / 100, f"{used:.0f}%"))
+        elif e["five_hit"]:
+            rows.append(("bar", "Сессия (5 часов)", 1.0, "лимит исчерпан"))
+        elif e["cap"]:
+            frac = min(e["five"] / e["cap"], 1.0)
+            rows.append(("bar", "Сессия (5 часов), оценка", frac, f"≈{frac * 100:.0f}%  ·  {_tokens(e['five'])}"))
+        else:
+            frac = e["five"] / e["record"] if e["record"] else 0.0
+            rows.append(("bar", "Сессия (5 часов)", min(frac, 1.0), _tokens(e["five"])))
+        resets = ex["five_hour"][1] if "five_hour" in ex else e["five_reset"]
+        if resets:
+            rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)))
+        else:
+            rows.append(("value", "Сейчас окна нет", "начнётся с запроса"))
+        rows.append(("value", "Ответов в окне", f"{e['five_count']}  ·  вывод {_tokens(e['five_out'])}"))
+        # неделя
+        rows.append(("sep",))
+        if "seven_day" in ex:
+            used, resets = ex["seven_day"]
+            rows.append(("bar", "Неделя", used / 100, f"{used:.0f}%"))
+            if resets:
+                rows.append(("value", f"Сброс через {_until(resets)}", _at(resets)))
+        else:
+            rows.append(("value", "За 7 дней", f"{_tokens(e['week'])}  ·  {e['week_count']} ответов"))
+            if e["week_hit"]:
+                rows.append(("value", f"Недельный лимит, сброс через {_until(e['week_reset'])}",
+                             _at(e["week_reset"])))
+        rows.append(("value", "Чтение из кэша за 7 дней", _tokens(e["week_reads"])))
+        rows.append(("sep",))
+        if ex:
+            rows.append(("text", "Проценты — из строки состояния Claude Code в терминале"))
+        elif e["cap"]:
+            rows.append(("text", "Оценка по журналам: 100% — расход до последнего упора в лимит"))
+        else:
+            rows.append(("text", "По журналам Claude Code; полоса — доля от самого большого окна"))
+        rows.append(("text", "Считаются ввод, вывод и запись в кэш"))
+        rows.append(("button", "Точные лимиты на claude.ai…", "https://claude.ai/settings/usage"))
+        if d["hook"] == "ours":
+            rows.append(("button", "Отключить строку состояния claude", claude_disconnect))
+        elif d["hook"] == "none":
+            rows.append(("button", "Точные % из терминального claude", claude_connect))
         return rows
 
 
