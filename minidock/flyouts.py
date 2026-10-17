@@ -108,8 +108,7 @@ class Flyout(QWidget):
         b.clicked.connect(clicked)
         return b
 
-    def open_under(self, anchor_global, side="top"):
-        """Показать под anchor (панель сверху) или рядом с доком: side — край экрана, у которого док."""
+    def open_under(self, anchor_global):
         self.clear()
         self.build()
         self.lay.activate()
@@ -119,11 +118,6 @@ class Flyout(QWidget):
         scr = (QApplication.screenAt(anchor_global.center().toPoint()) or QApplication.primaryScreen()).geometry()
         x = int(min(max(anchor_global.center().x() - w / 2, scr.left() + 6), scr.right() - w - 6))
         y = int(anchor_global.bottom() + 6)
-        if side == "bottom":
-            y = int(anchor_global.top() - h - 10)
-        elif side in ("left", "right"):
-            y = int(min(max(anchor_global.center().y() - h / 2, scr.top() + 6), scr.bottom() - h - 6))
-            x = int(anchor_global.right() + 10 if side == "left" else anchor_global.left() - w - 10)
         self.move(x, y)
         self.show()
         QTimer.singleShot(20, lambda: self.isVisible() and try_foreground(int(self.winId())))

@@ -19,9 +19,6 @@
         ("bar", подпись, доля 0..1, значение)  — полоса заполнения (лимиты, загрузка)
         ("button", подпись, действие)          — кнопка: функция или адрес/путь (открывается в Windows)
         ("sep",)                               — разделитель
-    paint_tile(painter, rect, data) — необязательно: как виджет выглядит в доке (квадрат размером с иконку);
-                    без него в доке — плитка со значком и надписью text(data).
-Виджеты добавляются и на панель (настройки), и в док (правый клик по доку → «Добавить виджет»).
 """
 import datetime
 import importlib.util
@@ -61,9 +58,6 @@ class BarWidget:
         return []
 
     paint_icon = None  # необязательно: функция (painter, QRectF) — свой значок вместо символа icon
-    paint_tile = None  # необязательно: (painter, QRectF, данные) — как виджет выглядит в доке (размер иконки)
-    dock_width = 1.0   # ширина в доке в размерах иконки (плеер — шире)
-    click = None       # необязательно: (QRectF плитки, QPointF клика, данные) -> True, если клик обработан
 
 
 # -- встроенные -----------------------------------------------------------------------------------
@@ -123,20 +117,6 @@ class SystemWidget(BarWidget):
     def text(self, d):
         return f"ЦП {d['cpu']:.0f}%   ОЗУ {d['mem']:.0f}%"
 
-    def paint_tile(self, p, rect, d):
-        """В доке: процессор — внешнее кольцо, память — внутреннее, в центре процент процессора."""
-        tile_base(p, rect)
-        s = rect.width()
-        w = max(2.0, s * 0.07)
-        outer = rect.adjusted(s * 0.14, s * 0.14, -s * 0.14, -s * 0.14)
-        inner = outer.adjusted(w * 1.6, w * 1.6, -w * 1.6, -w * 1.6)
-        tile_ring(p, outer, d["cpu"] / 100, _level_color(d["cpu"] / 100), w)
-        tile_ring(p, inner, d["mem"] / 100, _level_color(d["mem"] / 100, QColor(48, 209, 88)), w)
-        f = QFont("Segoe UI Semibold")
-        f.setPixelSize(max(6, int(s * 0.17)))
-        p.setFont(f)
-        p.setPen(QColor(245, 245, 248))
-        p.drawText(inner, Qt.AlignCenter, f"{d['cpu']:.0f}%")
 
     def panel(self, d):
         rows = [("title", "Система"),
@@ -606,18 +586,6 @@ class ClaudeWidget(BarWidget):
     def pct(g):
         return "—" if g[0] is None else f"{min(g[0], 1.0) * 100:.0f}%"
 
-    def paint_tile(self, p, rect, d):
-        """В доке: сессия — внешнее кольцо, неделя — внутреннее, логотип в центре."""
-        tile_base(p, rect)
-        s = rect.width()
-        w = max(2.0, s * 0.07)
-        outer = rect.adjusted(s * 0.13, s * 0.13, -s * 0.13, -s * 0.13)
-        inner = outer.adjusted(w * 1.6, w * 1.6, -w * 1.6, -w * 1.6)
-        five, week = self.gauges(d) if d.get("claude") else ((None, False), (None, False))
-        tile_ring(p, outer, five[0], _level_color(five[0], CLAUDE_ORANGE), w)
-        tile_ring(p, inner, week[0], _level_color(week[0], QColor(240, 170, 140)), w)
-        c = inner.center()
-        paint_claude_logo(p, QRectF(c.x() - s * 0.13, c.y() - s * 0.13, s * 0.26, s * 0.26))
 
     def text(self, d):
         if not d.get("claude"):
@@ -758,23 +726,20 @@ class CalibrateDialog(QDialog):
         return self.five.value(), five.timestamp(), self.week.value(), week.timestamp()
 
 
-GLYPH_MUSIC, GLYPH_PREV, GLYPH_NEXT = "\ue8d6", "\ue892", "\ue893"
-GLYPH_PLAY, GLYPH_PAUSE = "\ue768", "\ue769"
+GLYPH_MUSIC = ""
 
 
 class MediaWidget(BarWidget):
-    """Что сейчас играет (Spotify, YouTube в браузере, …): в доке — широкая плитка с обложкой, названием
-    и кнопками «назад / пауза / вперёд», на панели — название трека."""
+    """Что сейчас играет (Spotify, YouTube в браузере, …): на панели — название трека, в окне — кнопки
+    «пауза / следующий / предыдущий»."""
     id = "media"
     name = "Плеер — что сейчас играет"
     icon = GLYPH_MUSIC
     interval = 1.0
-    dock_width = 3.6
 
     def __init__(self):
         from .media import media_core
         self.core = media_core()
-        self.covers = {}  # ключ трека -> QImage обложки (рисуем в потоке интерфейса)
 
     def update(self, detailed):
         return dict(sessions=self.core.sessions(), available=self.core.available)
@@ -810,92 +775,6 @@ class MediaWidget(BarWidget):
                 ("button", "Пауза" if cur["playing"] else "Играть", lambda: self.control(cur, "toggle")),
                 ("button", "Следующий трек", lambda: self.control(cur, "next")),
                 ("button", "Предыдущий трек", lambda: self.control(cur, "prev"))]
-
-    # -- плитка в доке
-    def cover(self, cur):
-        if cur is None or not cur.get("cover"):
-            return None
-        key = (cur["app"], cur["title"], cur["artist"], len(cur["cover"]))
-        img = self.covers.get(key)
-        if img is None:
-            from .flyouts import trim_cover
-            img = trim_cover(QImage.fromData(cur["cover"]))
-            if len(self.covers) > 16:
-                self.covers.clear()
-            self.covers[key] = img
-        return None if img.isNull() else img
-
-    @staticmethod
-    def parts(rect):
-        """Где что в плитке: (обложка, текст, [(кнопка, действие)]). Узкая плитка — только обложка и пауза."""
-        h, w = rect.height(), rect.width()
-        pad = min(h, w) * 0.1
-        side = min(h, w) - 2 * pad
-        art = QRectF(rect.left() + pad, rect.top() + pad, side, side)
-        if w < h * 1.6:
-            c = art.center()
-            return art, None, [(QRectF(c.x() - side * 0.25, c.y() - side * 0.25, side * 0.5, side * 0.5), "toggle")]
-        x0 = art.right() + pad * 1.3
-        text = QRectF(x0, rect.top() + pad * 0.9, rect.right() - pad - x0, h * 0.42)
-        bw = (rect.right() - pad - x0) / 3
-        by, bh = rect.top() + h * 0.56, h * 0.34
-        buttons = [(QRectF(x0 + k * bw, by, bw, bh), a) for k, a in enumerate(("prev", "toggle", "next"))]
-        return art, text, buttons
-
-    def paint_tile(self, p, rect, d):
-        cur = self.current(d)
-        tile_base(p, rect)
-        art, text, buttons = self.parts(rect)
-        img = self.cover(cur)
-        ap = rounded_path(art, art.width() * 0.16)
-        if img is not None:
-            p.save()
-            p.setClipPath(ap)
-            p.setRenderHint(QPainter.SmoothPixmapTransform)
-            s = min(img.width(), img.height())
-            p.drawImage(art, img, QRectF((img.width() - s) / 2, (img.height() - s) / 2, s, s))
-            p.restore()
-        else:
-            p.fillPath(ap, QColor(255, 255, 255, 22))
-            f = QFont("Segoe MDL2 Assets")
-            f.setPixelSize(max(6, int(art.height() * 0.4)))
-            p.setFont(f)
-            p.setPen(QColor(255, 255, 255, 150))
-            p.drawText(art, Qt.AlignCenter, GLYPH_MUSIC)
-        playing = cur is not None and cur["playing"]
-        if text is not None:
-            h = rect.height()
-            f = QFont("Segoe UI Semibold")
-            f.setPixelSize(max(6, int(h * 0.19)))
-            p.setFont(f)
-            p.setPen(QColor(245, 245, 248))
-            title = (cur["title"] or "Без названия") if cur else "Ничего не играет"
-            p.drawText(QRectF(text.left(), text.top(), text.width(), text.height() * 0.55), Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetricsF(f).elidedText(title, Qt.ElideRight, text.width()))
-            f2 = QFont("Segoe UI")
-            f2.setPixelSize(max(6, int(h * 0.15)))
-            p.setFont(f2)
-            p.setPen(QColor(255, 255, 255, 150))
-            p.drawText(QRectF(text.left(), text.top() + text.height() * 0.52, text.width(), text.height() * 0.48),
-                       Qt.AlignLeft | Qt.AlignVCenter,
-                       QFontMetricsF(f2).elidedText(cur["artist"] if cur else "", Qt.ElideRight, text.width()))
-        gf = QFont("Segoe MDL2 Assets")
-        for r, action in buttons:
-            glyph = {"prev": GLYPH_PREV, "next": GLYPH_NEXT}.get(action, GLYPH_PAUSE if playing else GLYPH_PLAY)
-            if text is None:  # узкая плитка: кнопка поверх обложки
-                p.fillPath(rounded_path(r, r.width() / 2), QColor(0, 0, 0, 120))
-            gf.setPixelSize(max(6, int(min(r.height(), r.width()) * (0.55 if text is None else 0.62))))
-            p.setFont(gf)
-            p.setPen(QColor(245, 245, 248) if cur is not None else QColor(255, 255, 255, 80))
-            p.drawText(r, Qt.AlignCenter, glyph)
-
-    def click(self, rect, pos, d):
-        cur = self.current(d)
-        for r, action in self.parts(rect)[2]:
-            if r.adjusted(-2, -2, 2, 2).contains(pos):
-                self.control(cur, action)
-                return True
-        return False
 
 
 BUILTIN = [SystemWidget, NetworkWidget, ClaudeWidget, MediaWidget]
@@ -1018,13 +897,6 @@ class WidgetHost(QObject):
     def enabled(self):
         return [i for i in self.cfg.get("bar_widgets", []) if i in self.classes]
 
-    def active(self):
-        """Что опрашивать: виджеты верхней панели и виджеты в доке."""
-        ids = self.enabled()
-        for e in self.cfg.get("pinned") or []:
-            if isinstance(e, dict) and e.get("widget") in self.classes and e["widget"] not in ids:
-                ids.append(e["widget"])
-        return ids
 
     def set_enabled(self, wid, on):
         lst = [i for i in self.cfg.get("bar_widgets", []) if i != wid]
@@ -1046,10 +918,6 @@ class WidgetHost(QObject):
                     return None
             return inst
 
-    def poke(self, wid):
-        """Обновить виджет как можно скорее (нажали кнопку — показать новое состояние)."""
-        self.due.pop(wid, None)
-        self.wake.set()
 
     def set_detailed(self, wid, on):
         (self.detailed.add if on else self.detailed.discard)(wid)
@@ -1061,7 +929,7 @@ class WidgetHost(QObject):
         while True:
             now = time.monotonic()
             nearest = 5.0
-            for wid in self.active():
+            for wid in self.enabled():
                 inst = self.instance(wid)
                 if inst is None:
                     continue
@@ -1092,23 +960,6 @@ class WidgetHost(QObject):
         except Exception:
             return "⚠"
 
-    def paint_tile(self, wid, p, rect):
-        """Виджет в доке: свой рисунок виджета или плитка «значок + надпись»."""
-        inst, data = self.instance(wid), self.data.get(wid)
-        cls = self.classes.get(wid)
-        ok = data is not None and not (isinstance(data, dict) and "__error__" in data)
-        if inst is not None and ok and getattr(inst, "paint_tile", None):
-            try:
-                p.save()
-                inst.paint_tile(p, rect, data)
-                return
-            except Exception:
-                traceback.print_exc()
-            finally:
-                p.restore()
-        p.save()
-        paint_default_tile(p, rect, cls, self.bar_text(wid))
-        p.restore()
 
     def panel_rows(self, wid):
         inst, data = self.instances.get(wid), self.data.get(wid)
@@ -1125,45 +976,7 @@ class WidgetHost(QObject):
 
 # -- окно виджета ---------------------------------------------------------------------------------
 
-def tile_base(p, rect):
-    """Подложка виджета в доке — скруглённый квадрат, как у иконок."""
-    p.setPen(Qt.NoPen)
-    p.fillPath(rounded_path(rect, rect.width() * 0.22), QColor(38, 38, 46, 235))
-    p.setPen(QPen(QColor(255, 255, 255, 30), 1))
-    p.setBrush(Qt.NoBrush)
-    p.drawPath(rounded_path(rect, rect.width() * 0.22))
 
-
-def tile_ring(p, rect, frac, color, width):
-    pen = QPen(QColor(255, 255, 255, 30), width)
-    pen.setCapStyle(Qt.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.NoBrush)
-    p.drawEllipse(rect)
-    if frac is not None and frac > 0.004:
-        pen.setColor(color)
-        p.setPen(pen)
-        p.drawArc(rect, 90 * 16, -int(360 * 16 * min(frac, 1.0)))
-
-
-def paint_default_tile(p, rect, cls, text):
-    tile_base(p, rect)
-    s = rect.width()
-    icon = QRectF(rect.center().x() - s * 0.17, rect.top() + s * 0.16, s * 0.34, s * 0.34)
-    if cls is not None and cls.paint_icon:
-        cls.paint_icon(p, icon)
-    elif cls is not None and cls.icon:
-        f = QFont("Segoe MDL2 Assets")
-        f.setPixelSize(max(6, int(s * 0.28)))
-        p.setFont(f)
-        p.setPen(QColor(235, 235, 240))
-        p.drawText(icon, Qt.AlignCenter, cls.icon)
-    f = QFont("Segoe UI Semibold")
-    f.setPixelSize(max(6, int(s * 0.17)))
-    p.setFont(f)
-    p.setPen(QColor(245, 245, 248))
-    box = QRectF(rect.left() + s * 0.06, rect.top() + s * 0.56, s * 0.88, s * 0.3)
-    p.drawText(box, Qt.AlignCenter, QFontMetricsF(f).elidedText(text, Qt.ElideRight, box.width()))
 
 
 ROW_H = {"title": 26, "text": 20, "value": 24, "bar": 40, "sep": 13, "button": 34, "rings": 156, "stats": 62}

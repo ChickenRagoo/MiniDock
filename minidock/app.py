@@ -39,8 +39,7 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
-            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
-            "--test-dock-widget": "MiniDock_TestDockWidget"}
+            "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -60,7 +59,7 @@ class App:
         self.save_timer = QTimer(singleShot=True, interval=400, timeout=lambda: save_cfg(self.cfg))
         self.animator = WindowAnimator(self)
         self.preview = WindowPreview(self)
-        self.widgets = WidgetHost(self.cfg)  # до дока: в доке тоже бывают виджеты
+        self.widgets = WidgetHost(self.cfg)
         self.dock = Dock(self)
         self.bar = MenuBar(self)
         self.extra_bars = {}  # имя монитора -> панель на дополнительном мониторе
@@ -346,11 +345,6 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
-        elif flag == "--test-dock-widget":  # окно первого виджета в доке (для проверки)
-            it = next((it for it in self.dock.pinned if it.kind == "widget"), None)
-            if it is not None:
-                self.dock.reveal(4.0)
-                QTimer.singleShot(500, lambda: self.dock.open_widget(it))
         elif flag == "--test-clock":  # открыть календарь под часами (для проверки)
             from PySide6.QtCore import QRectF as _R
             from .flyouts import ClockFlyout

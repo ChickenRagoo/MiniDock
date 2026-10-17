@@ -114,6 +114,8 @@ def load_cfg(default_pinned):
         saved["switcher_hover"] = True  # наведение больше не переключает, а только показывает окна
     saved["cfg_version"] = CFG_VERSION
     cfg.update({k: v for k, v in saved.items() if k in DEFAULT_CFG})
+    if cfg["pinned"]:  # виджеты в доке были в 1.7.0–1.7.1 и убраны
+        cfg["pinned"] = [e for e in cfg["pinned"] if not (isinstance(e, dict) and "widget" in e)]
     if cfg["pinned"] is None:
         cfg["pinned"] = default_pinned()
     return cfg
