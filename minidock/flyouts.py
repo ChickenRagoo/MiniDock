@@ -73,6 +73,7 @@ class Flyout(QWidget):
         self.lay.setContentsMargins(14, 12, 14, 14)
         self.lay.setSpacing(8)
         self.glass = make_glass(self)
+        self.glass.region = self.glass_region
 
     def clear(self):
         def wipe(layout):
@@ -129,9 +130,16 @@ class Flyout(QWidget):
         prepare_glass(self.glass)
         fade_in(self, slide=10)
 
+    def glass_region(self):
+        """Фон снимаем с запасом — до низа экрана: окно может вырасти (раскрылся список, появился плеер),
+        а переснимать фон, пока окно на экране, нельзя — в снимок попадёт само окно."""
+        bottom = self.screen().geometry().bottom() - self.y()
+        return QRectF(0, 0, self.width(), max(self.height(), bottom))
+
     def resizeEvent(self, e):
-        if self.isVisible():  # Wi‑Fi дорисовывает список — фон снимаем заново под новый размер
-            self.glass.refresh()
+        # обычный снимок уже покрывает окно с запасом; живой фон снимает тот же участок — ничего не делаем
+        if self.isVisible() and self.glass.live_on:
+            self.glass.start_live()
 
     def hideEvent(self, e):
         self.bar.flyout_closed(self)
@@ -918,13 +926,6 @@ class VolumeFlyout(Flyout):
                 self.settle()
             self.panel_h = self.content_height()
             card.hide_animated(self.anim_step, gone)
-
-    def resizeEvent(self, e):
-        if self.isVisible():
-            if self.glass.live_on:
-                self.glass.start_live()  # живой фон сам догонит новый размер окна
-            else:
-                self.glass.refresh()
 
     def showEvent(self, e):
         super().showEvent(e)

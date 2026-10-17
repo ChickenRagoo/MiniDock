@@ -229,7 +229,8 @@ def helper_main(parent_pid):
         start = time.perf_counter()
         with lock:
             current = dict(jobs)
-        if start - excluded_at > 0.5:
+        # новое окно со «стеклом» — сразу исключаем его из снимка, иначе первые кадры фона покажут его самого
+        if start - excluded_at > 0.5 or set(current) != set(last):
             mag.exclude_parent_windows()
             excluded_at = start
         changed = False
