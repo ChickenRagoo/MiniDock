@@ -1,5 +1,7 @@
 """Главный объект MiniDock: связывает док, верхнюю панель, анимации, Launchpad и переключатель."""
 import atexit
+import faulthandler
+import os
 import sys
 import threading
 import time
@@ -32,7 +34,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-spotlight": "MiniDock_TestSpotlight", "--test-lp-start": "MiniDock_TestLpStart",
             "--reveal": "MiniDock_Reveal", "--test-preview": "MiniDock_TestPreview",
             "--test-restore": "MiniDock_TestRestore", "--test-folder": "MiniDock_TestFolder",
-            "--test-lp-folder": "MiniDock_TestLpFolder"}
+            "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show"}
+SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
 
@@ -53,6 +56,7 @@ class App:
         self.preview = WindowPreview(self)
         self.dock = Dock(self)
         self.bar = MenuBar(self)
+        self.extra_bars = {}  # имя монитора -> панель на дополнительном мониторе
         self.launchpad = Launchpad(self)
         self.spotlight = Spotlight(self)
         self.switcher = Switcher(self)
@@ -61,6 +65,8 @@ class App:
 
         self.apply_layout()
         QApplication.primaryScreen().geometryChanged.connect(self.apply_layout)
+        QApplication.instance().screenAdded.connect(lambda *_: QTimer.singleShot(500, self.apply_layout))
+        QApplication.instance().screenRemoved.connect(lambda *_: QTimer.singleShot(500, self.apply_layout))
 
         self._hook_proc = WINEVENTPROC(self.on_winevent)
         self._hooks = [user32.SetWinEventHook(lo, hi, None, self._hook_proc, 0, 0, 0x0002)  # SKIPOWNPROCESS
@@ -69,6 +75,10 @@ class App:
                                       (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
 
+        self.beat = time.monotonic()
+        self.beat_timer = QTimer(interval=1000, timeout=lambda: setattr(self, "beat", time.monotonic()))
+        self.beat_timer.start()
+        threading.Thread(target=self.watchdog, daemon=True, name="MiniDockWatchdog").start()
         self.poll_timer = QTimer(interval=1000, timeout=self.poll)
         self.poll_timer.start()
         # команды (--quit, --launchpad, …) ждёт отдельный поток — в простое он спит и не тратит ничего
@@ -78,6 +88,20 @@ class App:
         self.waiter.fired.connect(self.on_command)
         self.poll()
         self.bar.on_foreground(win32gui.GetForegroundWindow())
+
+    def watchdog(self):
+        """Интерфейс не отвечает больше 20 с — записываем в журнал, чем заняты все потоки (один раз)."""
+        reported = False
+        while True:
+            time.sleep(5)
+            stuck = time.monotonic() - self.beat > 20
+            if stuck and not reported and sys.stderr is not None:
+                try:
+                    print(f"\n=== MiniDock завис ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===", file=sys.stderr, flush=True)
+                    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                except Exception:
+                    pass
+            reported = stuck
 
     # -- settings
     def bar_height(self):
@@ -115,6 +139,7 @@ class App:
             self.bar.show()
         else:
             self.bar.hide()
+        self.place_extra_bars()
         self.dock.place()
         if not self.fullscreen:
             self.dock.show()
@@ -122,6 +147,30 @@ class App:
         self.apply_shadows()
         self.update_work_area()
         self.launchpad.update()
+
+    def bars(self):
+        return [self.bar] + list(self.extra_bars.values())
+
+    def place_extra_bars(self):
+        """Верхняя панель на дополнительных мониторах (настройка «На всех мониторах»)."""
+        primary = QApplication.primaryScreen()
+        want = {}
+        if self.cfg["menubar"] and self.cfg["bar_all_screens"]:
+            want = {s.name(): s for s in QApplication.screens() if s is not primary}
+        for name in list(self.extra_bars):
+            bar = self.extra_bars[name]
+            if name not in want or bar.home not in QApplication.screens():
+                bar.release()
+                bar.hide()
+                bar.deleteLater()
+                del self.extra_bars[name]
+        for name, scr in want.items():
+            bar = self.extra_bars.get(name)
+            if bar is None:
+                bar = self.extra_bars[name] = MenuBar(self, scr)
+                bar.on_foreground(win32gui.GetForegroundWindow())
+            bar.show()
+            bar.place()
 
     def apply_shadows(self):
         cfg = self.cfg
@@ -158,6 +207,8 @@ class App:
             set_work_area(self.want_area)
 
     def cleanup(self):
+        for bar in self.extra_bars.values():  # вернуть место сверху на дополнительных мониторах
+            bar.release()
         self.animator.cleanup()
         self.keys.unhook()
         if self.taskbar.hidden or self.cfg.get("taskbar_orig_state") is not None:
@@ -192,6 +243,13 @@ class App:
             self.open_settings()
         elif flag == "--spotlight":
             self.spotlight.toggle()
+        elif flag == "--show":
+            # MiniDock запустили ещё раз: показать док и панель (даже если считали, что идёт игра) и ответить
+            self.fullscreen = False
+            self.animator.gpu.set_enabled(True)
+            self.apply_layout()
+            self.dock.reveal(3.0)
+            signal_running(SHOW_ACK)
         elif flag == "--reveal":
             self.dock.reveal(4.0)
         elif flag == "--test-lp-start":
@@ -277,7 +335,8 @@ class App:
         try:
             if event == EVENT_SYSTEM_FOREGROUND:
                 self.touch_mru(hwnd)
-                self.bar.on_foreground(hwnd)
+                for bar in self.bars():
+                    bar.on_foreground(hwnd)
                 QTimer.singleShot(400, lambda: self.animator.take_snapshot(hwnd))
             elif event == EVENT_SYSTEM_CAPTURESTART:
                 self.animator.on_press(hwnd)
@@ -344,6 +403,30 @@ def signal_running(name):
         pass
 
 
+def take_over(mutex):
+    """MiniDock уже запущен. Просим его показаться; если он завис и не отвечает — закрываем его.
+    True — старого экземпляра больше нет, запускаемся сами."""
+    ack = win32event.CreateEvent(None, False, False, SHOW_ACK)
+    signal_running(COMMANDS["--show"])
+    if win32event.WaitForSingleObject(ack, 4000) == win32event.WAIT_OBJECT_0:
+        return False  # живой — он сам показался
+    import psutil
+    me = os.getpid()
+    mine = os.path.normcase(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]))
+    for proc in psutil.process_iter(["pid", "exe", "cmdline"]):
+        try:
+            if proc.info["pid"] == me:
+                continue
+            exe = os.path.normcase(proc.info["exe"] or "")
+            cmd = [os.path.normcase(os.path.abspath(c)) for c in (proc.info["cmdline"] or [])[1:2]]
+            if exe == mine or mine in cmd:
+                proc.kill()
+        except (psutil.Error, OSError, ValueError):
+            pass
+    # ждём, пока Windows освободит «занято» от завершённого процесса
+    return win32event.WaitForSingleObject(mutex, 5000) in (win32event.WAIT_OBJECT_0, win32event.WAIT_ABANDONED)
+
+
 def main(script):
     if "--quit" in sys.argv:
         signal_running(QUIT_EVENT)
@@ -353,7 +436,7 @@ def main(script):
             signal_running(name)
             return
     mutex = win32event.CreateMutex(None, False, "MiniDock_SingleInstance")
-    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+    if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS and not take_over(mutex):
         return
     quit_event = win32event.CreateEvent(None, True, False, QUIT_EVENT)
     win32event.ResetEvent(quit_event)

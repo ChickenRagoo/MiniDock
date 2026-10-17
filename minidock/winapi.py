@@ -269,22 +269,55 @@ def is_app_window(hwnd, need_visible=True):
 _pid_exe = {}  # pid -> путь к exe: процесс не меняет свой exe, поэтому узнаём один раз
 
 
+_frame_exe = {}  # окно ApplicationFrameHost -> exe программы внутри (запоминаем: внутреннее окно то есть, то нет)
+
+
+def _exe_of_pid(pid, seen):
+    seen.add(pid)
+    if pid not in _pid_exe:
+        try:
+            _pid_exe[pid] = psutil.Process(pid).exe().lower()
+        except (psutil.Error, OSError):
+            _pid_exe[pid] = None
+    return _pid_exe[pid]
+
+
+def _frame_app(hwnd, frame_pid, seen):
+    """Программа Store в окне-рамке ApplicationFrameHost (Параметры, Калькулятор…): процесс её
+    вложенного окна Windows.UI.Core.CoreWindow. Пока программа «спит», вложенного окна нет — берём запомненное."""
+    found = []
+
+    def child(h, _):
+        _, pid = win32process.GetWindowThreadProcessId(h)
+        if pid != frame_pid:
+            found.append(pid)
+        return True
+    try:
+        win32gui.EnumChildWindows(hwnd, child, None)
+    except Exception:
+        pass
+    for pid in found:
+        exe = _exe_of_pid(pid, seen)
+        if exe:
+            _frame_exe[hwnd] = exe
+            return exe
+    return _frame_exe.get(hwnd)
+
+
 def app_windows():
     """{exe_path_lower: [hwnd, ...]} в порядке z-order (сверху вниз)."""
     result = {}
     seen = set()
+    frames = set()
 
     def cb(hwnd, _):
         if not is_app_window(hwnd) or is_cloaked(hwnd):
             return True
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
-        seen.add(pid)
-        if pid not in _pid_exe:
-            try:
-                _pid_exe[pid] = psutil.Process(pid).exe().lower()
-            except (psutil.Error, OSError):
-                _pid_exe[pid] = None
-        exe = _pid_exe[pid]
+        exe = _exe_of_pid(pid, seen)
+        if exe and exe.endswith("\\applicationframehost.exe"):
+            frames.add(hwnd)
+            exe = _frame_app(hwnd, pid, seen)  # нет программы внутри — рамку не показываем вовсе
         if exe:
             result.setdefault(exe, []).append(hwnd)
         return True
@@ -293,6 +326,9 @@ def app_windows():
     for pid in list(_pid_exe):  # завершившиеся процессы забываем (их номер может достаться другому)
         if pid not in seen:
             del _pid_exe[pid]
+    for h in list(_frame_exe):
+        if h not in frames and not win32gui.IsWindow(h):
+            del _frame_exe[h]
     return result
 
 
@@ -349,10 +385,17 @@ def foreground_is_fullscreen():
     if pid == os.getpid():
         return False
     try:
+        info = win32api.GetMonitorInfo(win32api.MonitorFromWindow(fg))
+        if not info["Flags"] & 1:  # MONITORINFOF_PRIMARY: док и панель живут на основном мониторе
+            return False
+        if user32.IsZoomed(fg):  # обычное развёрнутое окно — не игра
+            return False
+        if win32gui.GetWindowLong(fg, win32con.GWL_STYLE) & win32con.WS_CAPTION == win32con.WS_CAPTION:
+            return False  # окно с заголовком — не полноэкранное приложение
         rect = win32gui.GetWindowRect(fg)
-        mon = win32api.GetMonitorInfo(win32api.MonitorFromWindow(fg))["Monitor"]
     except Exception:
         return False
+    mon = info["Monitor"]
     return rect[0] <= mon[0] and rect[1] <= mon[1] and rect[2] >= mon[2] and rect[3] >= mon[3]
 
 
@@ -667,6 +710,28 @@ def appbar_state(hwnd, new_state=None):
     shell32.SHAppBarMessage(10, ctypes.byref(abd))  # ABM_SETSTATE
 
 
+def appbar_reserve(hwnd, rect):
+    """Зарезервировать полосу rect (l, t, r, b, физические пиксели) у верхнего края монитора:
+    развёрнутые окна на этом мониторе не будут заходить под панель."""
+    abd = APPBARDATA()
+    abd.cbSize = ctypes.sizeof(APPBARDATA)
+    abd.hWnd = hwnd
+    abd.uCallbackMessage = 0x0400 + 77
+    shell32.SHAppBarMessage(0, ctypes.byref(abd))  # ABM_NEW (повторная регистрация безвредна)
+    abd.uEdge = 1  # ABE_TOP
+    abd.rc = wintypes.RECT(*rect)
+    shell32.SHAppBarMessage(2, ctypes.byref(abd))  # ABM_QUERYPOS
+    abd.rc.bottom = abd.rc.top + (rect[3] - rect[1])
+    shell32.SHAppBarMessage(3, ctypes.byref(abd))  # ABM_SETPOS
+
+
+def appbar_release(hwnd):
+    abd = APPBARDATA()
+    abd.cbSize = ctypes.sizeof(APPBARDATA)
+    abd.hWnd = hwnd
+    shell32.SHAppBarMessage(1, ctypes.byref(abd))  # ABM_REMOVE
+
+
 def taskbar_windows():
     hwnds = []
     win32gui.EnumWindows(lambda h, _: hwnds.append(h) if win32gui.GetClassName(h) in
@@ -867,6 +932,26 @@ VK_TAB, VK_ESCAPE, VK_RETURN, VK_LEFT, VK_RIGHT = 0x09, 0x1B, 0x0D, 0x25, 0x27
 VK_LWIN, VK_RWIN, VK_SHIFT, VK_LSHIFT, VK_RSHIFT = 0x5B, 0x5C, 0x10, 0xA0, 0xA1
 VK_MENU, VK_LMENU, VK_RMENU = 0x12, 0xA4, 0xA5
 VK_DUMMY = 0xE8  # неназначенная клавиша: гасит меню Alt и «Пуск» по одиночному Win
+
+
+user32.ToUnicodeEx.argtypes = [wintypes.UINT, wintypes.UINT, ctypes.c_char_p, wintypes.LPWSTR, ctypes.c_int,
+                               wintypes.UINT, wintypes.HKL]
+
+
+def key_text(vk, scan):
+    """Текст клавиши vk с учётом Shift/Caps Lock и раскладки активного окна ('' — не символ)."""
+    state = (ctypes.c_ubyte * 256)()
+    for k in (0x10, 0xA0, 0xA1):  # Shift
+        if user32.GetAsyncKeyState(k) & 0x8000:
+            state[k] = 0x80
+    if user32.GetKeyState(0x14) & 1:  # Caps Lock
+        state[0x14] = 0x01
+    fg = user32.GetForegroundWindow()
+    layout = user32.GetKeyboardLayout(user32.GetWindowThreadProcessId(fg, None) if fg else 0)
+    buf = ctypes.create_unicode_buffer(8)
+    # флаг 4 — не трогать состояние «мёртвых» клавиш в системе (Windows 10 1607+)
+    n = user32.ToUnicodeEx(vk, scan, ctypes.cast(state, ctypes.c_char_p), buf, 8, 4, layout)
+    return buf.value[:n] if n > 0 and buf.value[:n].isprintable() else ""
 
 
 def key_down(vk):

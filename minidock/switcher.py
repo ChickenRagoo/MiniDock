@@ -13,7 +13,7 @@ from .dock import Item
 from .previews import THUMB_RADIUS, LiveThumbs, row_layout, window_title
 from .ui import TOP_FLAGS, animate, fade_in, lerp, make_glass, precise_timer, prepare_glass, rounded_path, smooth
 from .winapi import (KBDLLHOOKSTRUCT, VK_ESCAPE, VK_LEFT, VK_LMENU, VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RMENU,
-                     VK_RWIN, VK_SHIFT, VK_TAB, LowLevelKeyboardProc, app_name_for, app_windows, force_foreground,
+                     VK_RWIN, VK_SHIFT, VK_TAB, key_text, LowLevelKeyboardProc, app_name_for, app_windows, force_foreground,
                      inject_dummy, inject_key, kernel32, key_down, press_keys, syscommand, user32)
 
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
@@ -36,6 +36,7 @@ class KeyHook(QObject):
     переключатель, открыть Launchpad) передаёт в основной поток сигналом.
     """
     action = Signal(str, int)
+    lp_key = Signal(int, str)  # клавиша для поиска Launchpad (vk, текст)
 
     def __init__(self, app):
         super().__init__()
@@ -47,6 +48,8 @@ class KeyHook(QObject):
         self.hook = None
         self.thread_id = 0
         self.action.connect(self.dispatch)  # из потока хука — в основной поток (queued)
+        self.lp_key.connect(lambda vk, text: self.app.launchpad.feed_key(vk, text))
+        self.lp_eaten = set()  # клавиши, нажатие которых отдали Launchpad, — их отпускание тоже забираем
         started = threading.Event()
         threading.Thread(target=self.run, args=(started,), daemon=True, name="MiniDockKeyHook").start()
         started.wait(2)
@@ -82,9 +85,31 @@ class KeyHook(QObject):
                 if interesting and not kb.flags & 0x10:  # LLKHF_INJECTED — свои же нажатия пропускаем
                     if self.handle(vk, wparam in (0x100, 0x104)):
                         return 1
+                if (self.app.launchpad.capture_keys or self.lp_eaten) and not kb.flags & 0x10 \
+                        and self.launchpad_key(vk, kb.scanCode, wparam in (0x100, 0x104)):
+                    return 1
         except Exception:
             pass
         return user32.CallNextHookEx(None, n, wparam, lparam)
+
+    LP_KEYS = {0x08, 0x09, 0x0D, 0x1B, 0x21, 0x22, 0x25, 0x26, 0x27, 0x28, 0x2E}  # Backspace, Tab, Enter, Esc…
+
+    def launchpad_key(self, vk, scan, down):
+        """Launchpad на экране, но без фокуса (Windows не всегда отдаёт его сразу): набранное уходит в его
+        поиск, а не в окно позади. Сочетания с Ctrl/Alt/Win не трогаем."""
+        if not down:
+            if vk in self.lp_eaten:
+                self.lp_eaten.discard(vk)
+                return True
+            return False
+        if not self.app.launchpad.capture_keys or any(key_down(k) for k in (0x11, 0x12, VK_LWIN, VK_RWIN)):
+            return False
+        text = "" if vk in self.LP_KEYS else key_text(vk, scan)
+        if vk not in self.LP_KEYS and not text:
+            return False
+        self.lp_eaten.add(vk)
+        self.lp_key.emit(vk, text)
+        return True
 
     def later(self, name, arg=0):
         self.action.emit(name, arg)

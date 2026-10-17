@@ -97,7 +97,13 @@ class VSyncClock(QObject):
         super().__init__()
         self.timers = set()
         self.pending = False
+        self.last_tick = 0.0
         self.wake = threading.Event()
+        # Запасной ход: на некоторых видеокартах и при уснувшем мониторе ожидание развёртки может не вернуться —
+        # тогда кадры идут от обычного таймера, и анимации не встают.
+        self.backup = QTimer(self, timeout=self._backup_tick)
+        self.backup.setTimerType(Qt.PreciseTimer)
+        self.backup.setInterval(4)
         self.wait = self._make_wait()
         self.tick.connect(self._on_tick)
         threading.Thread(target=self._run, daemon=True, name="MiniDockVSync").start()
@@ -128,9 +134,14 @@ class VSyncClock(QObject):
                 self.pending = True  # следующий кадр не ставим в очередь, пока не нарисован этот
                 self.tick.emit()
 
+    def _backup_tick(self):
+        if time.perf_counter() - self.last_tick > 0.03:  # от развёртки давно ничего — тикаем сами
+            self._on_tick()
+
     def _on_tick(self):
         self.pending = False
         now = time.perf_counter()
+        self.last_tick = now
         for t in list(self.timers):
             if t in self.timers:
                 t._fire(now)
@@ -138,11 +149,15 @@ class VSyncClock(QObject):
     def add(self, t):
         self.timers.add(t)
         self.wake.set()
+        if not self.backup.isActive():
+            self.last_tick = time.perf_counter()
+            self.backup.start()
 
     def remove(self, t):
         self.timers.discard(t)
         if not self.timers:
             self.wake.clear()
+            self.backup.stop()
 
 
 _clock = None

@@ -18,8 +18,9 @@ from pathlib import Path
 
 import win32api
 import win32con
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPalette, QPixmap
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetricsF, QImage, QKeyEvent, QPainter, QPainterPath, QPalette,
+                           QPixmap)
 from PySide6.QtWidgets import QApplication, QLineEdit, QWidget
 
 from .config import CFG_DIR, ICON_CACHE
@@ -203,6 +204,7 @@ class Launchpad(QWidget):
         self.picked = []            # выделенные приложения (рамкой с зажатой кнопкой мыши или Ctrl+клик)
         self.band = None            # рамка выделения: (начало, текущая точка)
         self.uninstalled.connect(self.after_uninstall)
+        self.capture_keys = False  # открыт, но без фокуса — хук клавиатуры отдаёт нажатия сюда
         self.page = 0
         self.page_pos = 0.0
         self.selected = 0
@@ -416,7 +418,9 @@ class Launchpad(QWidget):
         self.raise_()
         self.activateWindow()
         enable_blur(int(self.winId()))
-        QTimer.singleShot(10, lambda: force_foreground(int(self.winId())))
+        self.capture_keys = True
+        for ms in (10, 60, 150, 300, 600, 1000):  # Windows может не отдать фокус с первого раза
+            QTimer.singleShot(ms, self.ensure_focus)
         self.search.setFocus()
         self._fade = animate(self, 200, self.setWindowOpacity)
 
@@ -424,6 +428,7 @@ class Launchpad(QWidget):
         if self.closing:
             return
         self.closing = True
+        self.capture_keys = False
         start = self.windowOpacity()
 
         def done():
@@ -849,11 +854,37 @@ class Launchpad(QWidget):
             else:
                 self.close_animated()
 
+    def ensure_focus(self):
+        if not self.isVisible() or self.closing:
+            return
+        if not self.isActiveWindow():
+            force_foreground(int(self.winId()))
+        if self.folder_title.hasFocus():
+            return
+        self.search.setFocus()
+        self.capture_keys = not self.isActiveWindow()
+
+    def feed_key(self, vk, text):
+        """Нажатие из хука клавиатуры (пока у Launchpad нет фокуса) — как будто набрано в поиске."""
+        if not self.isVisible() or self.closing:
+            self.capture_keys = False
+            return
+        keys = {0x08: Qt.Key_Backspace, 0x09: Qt.Key_Tab, 0x0D: Qt.Key_Return, 0x1B: Qt.Key_Escape,
+                0x21: Qt.Key_PageUp, 0x22: Qt.Key_PageDown, 0x25: Qt.Key_Left, 0x26: Qt.Key_Up, 0x27: Qt.Key_Right,
+                0x28: Qt.Key_Down, 0x2E: Qt.Key_Delete}
+        QApplication.sendEvent(self.search, QKeyEvent(QEvent.KeyPress, keys.get(vk, Qt.Key_unknown), Qt.NoModifier,
+                                                      text))
+        self.ensure_focus()
+
+    def hideEvent(self, e):
+        self.capture_keys = False
+
     def changeEvent(self, e):
         # клик в другое окно (или Alt+Tab) закрывает Launchpad, как на Mac —
         # но только если он уже успел получить фокус (иначе закрылся бы сразу при открытии)
         if e.type() != e.Type.ActivationChange or not self.isVisible():
             return
+        self.capture_keys = not self.isActiveWindow() and not self.closing
         if self.isActiveWindow():
             self.was_active = True
         elif self.was_active and time.monotonic() - self.opened_at > 0.5:

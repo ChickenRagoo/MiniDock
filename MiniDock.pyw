@@ -21,6 +21,8 @@ if getattr(sys, "frozen", False) and "--" not in " ".join(sys.argv[1:]):
     _log_dir = os.path.join(os.environ.get("APPDATA", "."), "MiniDock")
     os.makedirs(_log_dir, exist_ok=True)
     sys.stderr = sys.stdout = open(os.path.join(_log_dir, "error.log"), "a", encoding="utf-8", buffering=1)
+    import faulthandler
+    faulthandler.enable(file=sys.stderr, all_threads=True)  # падение внутри Windows/Qt тоже попадёт в журнал
 
 from minidock.app import main  # noqa: E402
 

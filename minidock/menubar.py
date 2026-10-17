@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 from .flyouts import (BatteryFlyout, ClockFlyout, LangFlyout, TrayFlyout, VolumeFlyout, WifiFlyout, volume_endpoint,
                       volume_glyph)
 from .ui import MDL2, TOP_FLAGS, MacMenu, ease_out, per_frame, popup_menu, precise_timer, smooth
-from .winapi import (app_windows, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
+from .winapi import (app_windows, appbar_release, appbar_reserve, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
                      syscommand, user32, window_exe)
 
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -24,9 +24,11 @@ MONTHS = ["янв.", "февр.", "мар.", "апр.", "мая", "июн.", "и
 
 
 class MenuBar(QWidget):
-    def __init__(self, app):
+    def __init__(self, app, screen=None):
         super().__init__(None, TOP_FLAGS)
         self.app = app
+        self.home = screen        # None — основной монитор, иначе дополнительный (там своё резервирование места)
+        self.reserved = False
         self.cfg = app.cfg
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -70,10 +72,21 @@ class MenuBar(QWidget):
         return int(self.cfg["bar_height"])
 
     def place(self):
-        g = QApplication.primaryScreen().geometry()
+        scr = self.home or QApplication.primaryScreen()
+        g = scr.geometry()
         self.setGeometry(g.x(), g.y(), g.width(), self.H)
+        if self.home is not None:  # на основном мониторе место резервирует рабочая область, здесь — сама панель
+            dpr = scr.devicePixelRatio()
+            x, y = round(g.x() * dpr), round(g.y() * dpr)
+            appbar_reserve(int(self.winId()), (x, y, x + round(g.width() * dpr), y + round(self.H * dpr)))
+            self.reserved = True
         self.apply_blur()
         self.update()
+
+    def release(self):
+        if self.reserved:
+            appbar_release(int(self.winId()))
+            self.reserved = False
 
     def apply_blur(self):
         if self.isVisible():

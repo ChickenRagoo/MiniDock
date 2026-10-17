@@ -350,6 +350,8 @@ class SettingsWindow(QWidget):
         w, lay = self.page("Верхняя панель")
         self.group(lay, [
             self.toggle("menubar", "Показывать верхнюю панель"),
+            self.toggle("bar_all_screens", "На всех мониторах",
+                        "Панель появится и на дополнительных мониторах; развёрнутые окна там встанут под неё."),
             self.slider("bar_height", "Высота", 20, 36, fmt="{:.0f} px"),
             self.slider("bar_opacity", "Непрозрачность", 0, 255, fmt="{:.0f}"),
             self.toggle("bar_blur", "Размытие"),

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import win32api
 import win32con
+import win32gui
 from PySide6.QtCore import QPointF, QRect, QRectF, QSizeF, Qt, QTimer
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetricsF, QLinearGradient,
                            QPainter, QPainterPath, QPen, QPixmap)
@@ -518,6 +519,7 @@ class Dock(QWidget):
                 f.hwnds = [h for c in f.children for h in c.hwnds]
         old = {it.exe: it for it in self.running}
         running = []
+        now = time.monotonic()
         for exe, hwnds in wins.items():
             if exe in claimed or not os.path.exists(exe):
                 continue
@@ -527,7 +529,14 @@ class Dock(QWidget):
                 self.icon_cache[exe] = it
                 it.cur = None
             it.hwnds = hwnds
+            it.seen_at = now
             running.append(it)
+        # окна на миг пропали (программа Windows «уснула», окно перестраивается) — иконку не убираем сразу,
+        # иначе она мигает в доке
+        for exe, it in old.items():
+            if it not in running and exe not in claimed and now - getattr(it, "seen_at", 0) < 3:
+                it.hwnds = [h for h in it.hwnds if win32gui.IsWindow(h)]
+                running.insert(min(self.running.index(it), len(running)), it)
         self.running = running
         # перерисовываем, только если что-то видимое поменялось (иконки или точки запущенных)
         signature = tuple((id(it), bool(it.hwnds)) for it in self.items())

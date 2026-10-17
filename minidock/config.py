@@ -62,6 +62,7 @@ DEFAULT_CFG = {
     "shadows_orig": None,         # как было в системе до MiniDock — вернуть при выходе
     # верхняя панель
     "menubar": True,
+    "bar_all_screens": False,     # верхняя панель и на дополнительных мониторах
     "bar_height": 30,
     "bar_opacity": 255,
     "bar_blur": False,
