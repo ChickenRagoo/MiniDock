@@ -16,10 +16,10 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QIcon, QImage, QPainter
 from PySide6.QtWidgets import (QApplication, QCalendarWidget, QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton,
                                QSlider, QTableView, QToolButton, QVBoxLayout, QWidget)
 
-from . import audio
+from . import audio, bluetooth
 from .livecapture import blur_bgra
 from .media import MediaWatcher
-from .ui import MDL2, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
+from .ui import MDL2, Toggle, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
 from .winapi import (enable_blur, file_icon, force_foreground, kernel32, keyboard_layouts, lang_name, press_keys,
                      round_window, shell_icon_image, tray_click, tray_icons, try_foreground, user32)
 
@@ -287,6 +287,79 @@ class WifiFlyout(Flyout):
             if r.returncode != 0:  # нет сохранённого профиля — нужен пароль, открываем системный список
                 os.startfile("ms-availablenetworks:")
         threading.Thread(target=run, daemon=True).start()
+
+
+class BluetoothFlyout(Flyout):
+    """Bluetooth как Wi‑Fi: включить/выключить, сопряжённые устройства (подключённые — подсвечены),
+    параметры Windows. Подключать конкретное устройство чужой программе Windows не даёт — клик открывает
+    параметры Bluetooth."""
+    WIDTH = 290
+
+    def __init__(self, bar):
+        super().__init__(bar)
+        self.result = None
+        self.timer = QTimer(self, interval=100, timeout=self.check)
+
+    def build(self):
+        head = QHBoxLayout()
+        head.addWidget(self.label("Bluetooth", "title"), 1)
+        self.switch = Toggle(False)
+        self.switch.setEnabled(False)
+        self.switch.toggled.connect(self.set_on)
+        head.addWidget(self.switch)
+        self.lay.addLayout(head)
+        self.status = self.label("Ищем устройства…", "dim")
+        self.lay.addWidget(self.status)
+        self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(3)
+        self.lay.addLayout(self.list_box)
+        self.lay.addWidget(self.button("Параметры Bluetooth…", lambda: os.startfile("ms-settings:bluetooth")))
+        self.load()
+
+    def load(self):
+        self.result = "pending"
+        threading.Thread(target=lambda: setattr(self, "result", bluetooth.info()), daemon=True).start()
+        self.timer.start()
+
+    def check(self):
+        if self.result == "pending":
+            return
+        self.timer.stop()
+        res = self.result
+        while self.list_box.count():
+            item = self.list_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        on = res["on"]
+        self.switch.blockSignals(True)
+        self.switch.setChecked(bool(on))
+        self.switch.k = 1.0 if on else 0.0  # без анимации переключения при открытии
+        self.switch.blockSignals(False)
+        self.switch.setEnabled(on is not None)
+        if on is None:
+            self.status.setText("Bluetooth-адаптер не найден.")
+        elif not on:
+            self.status.setText("Bluetooth выключен")
+        else:
+            connected = [n for n, c in res["devices"] if c]
+            self.status.setText(f"Подключено: {', '.join(connected)}" if connected
+                                else "Нет подключённых устройств" if res["devices"] else "Нет сопряжённых устройств")
+            for name, conn in res["devices"][:9]:
+                self.list_box.addWidget(self.button(("  " + name + "   ✓") if conn else "  " + name,
+                                                    lambda: os.startfile("ms-settings:bluetooth"),
+                                                    "current" if conn else None))
+        self.refit()
+
+    def set_on(self, on):
+        self.switch.setEnabled(False)
+        self.status.setText("Включаем…" if on else "Выключаем…")
+
+        def run():
+            bluetooth.set_enabled(on)
+            self.result = bluetooth.info()
+        self.result = "pending"
+        threading.Thread(target=run, daemon=True).start()
+        self.timer.start()
 
 
 _volume = None

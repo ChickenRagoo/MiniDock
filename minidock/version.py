@@ -1,2 +1,2 @@
-__version__ = "1.7.10"
+__version__ = "1.8.0"
 REPO = "ChickenRagoo/MiniDock"  # репозиторий GitHub, откуда приходят обновления (владелец/имя)

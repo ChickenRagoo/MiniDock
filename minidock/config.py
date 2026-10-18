@@ -80,6 +80,7 @@ DEFAULT_CFG = {
     "bar_blur": False,
     "clock_seconds": True,
     "clock_date": True,
+    "show_bluetooth": True,       # значок Bluetooth на верхней панели (если есть адаптер)
     "show_battery": True,
     # Launchpad
     "lp_columns": 7,

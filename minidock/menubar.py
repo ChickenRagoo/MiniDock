@@ -3,6 +3,7 @@ import ctypes
 import datetime
 import os
 import subprocess
+import threading
 import time
 
 import psutil
@@ -13,7 +14,9 @@ from PySide6.QtCore import QPoint, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
-from .flyouts import (BatteryFlyout, ClockFlyout, LangFlyout, TrayFlyout, VolumeFlyout, WifiFlyout, volume_endpoint,
+from . import bluetooth
+from .flyouts import (BatteryFlyout, BluetoothFlyout, ClockFlyout, LangFlyout, TrayFlyout, VolumeFlyout, WifiFlyout,
+                      volume_endpoint,
                       volume_glyph)
 from .ui import MDL2, TOP_FLAGS, MacMenu, ease_out, paint_background, per_frame, popup_menu, precise_timer, smooth
 from .winapi import (app_windows, appbar_release, appbar_reserve, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
@@ -237,6 +240,9 @@ class MenuBar(QWidget):
                   ("icon", "", WifiFlyout, "net"),
                   ("icon", "", lambda r: self.app.spotlight.toggle(), "search"),
                   ("icon", "", TrayFlyout, "tray")]
+        if self.show_bt():  # Bluetooth — сразу левее Wi‑Fi
+            items.insert(next(k for k, it in enumerate(items) if it[3] == "net") + 1,
+                         ("icon", "", BluetoothFlyout, "bt"))
         host = self.app.widgets
         for wid in reversed(host.enabled()):  # виджеты — левее системных значков, в порядке включения
             items.append(("widget", host.bar_text(wid), (lambda r, wid=wid: self.toggle_widget(wid, r)), "w:" + wid))
@@ -274,6 +280,15 @@ class MenuBar(QWidget):
             p.setFont(f)
             p.setPen(QColor(245, 245, 248))
             p.drawText(r, Qt.AlignCenter, text)
+
+    def show_bt(self):
+        """Значок Bluetooth: включён в настройках и на компьютере есть адаптер (проверяем в фоне один раз)."""
+        if not self.cfg.get("show_bluetooth", True):
+            return False
+        if bluetooth._has_radio is None and not getattr(MenuBar, "_bt_probe", False):
+            MenuBar._bt_probe = True
+            threading.Thread(target=bluetooth.has_radio, daemon=True).start()
+        return bool(bluetooth._has_radio)
 
     def hit_at(self, pos):
         for r, cb, key in self.hits:

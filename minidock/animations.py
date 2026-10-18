@@ -108,6 +108,12 @@ class GenieOverlay:
         так между исчезновением окна и первым кадром анимации нет пустого кадра.
         """
         self.release_capture()
+        # слой стоит только на основном мониторе: окно с другого монитора на нём не нарисовать, а снимок экрана
+        # на месте окна (оно уже спрятано) показал бы рабочий стол — тогда «джинн» втягивал кусок рабочего стола
+        mon = primary_monitor_rect()
+        cx, cy = (frame[0] + frame[2]) // 2, (frame[1] + frame[3]) // 2
+        if not (mon[0] <= cx < mon[2] and mon[1] <= cy < mon[3]):
+            return None
         th = ctypes.c_void_p()
         if dwmapi.DwmRegisterThumbnail(self.hwnd, hwnd, ctypes.byref(th)) != 0:
             return None
@@ -325,6 +331,21 @@ class WindowAnimator:
         if self.press_snap and time.monotonic() - self.press_snap[1] > 5:
             self.press_snap = None
 
+    @staticmethod
+    def grab_window(hwnd, max_w=4096):
+        """Кадр окна: (QImage, рамка) или None. Некоторые программы (рисующие через видеокарту) отдают
+        PrintWindow чёрный кадр — тогда, если окно впереди и на экране, снимаем его прямо с экрана."""
+        snap = snapshot(hwnd, max_w=max_w)
+        if snap or win32gui.GetForegroundWindow() != hwnd or win32gui.IsIconic(hwnd):
+            return snap
+        g = window_geometry(hwnd)
+        img = grab_screen(g[0]) if g else None
+        if img is None or img.isNull():
+            return None
+        if img.width() > max_w:
+            img = img.scaledToWidth(max_w, Qt.SmoothTransformation)
+        return img, g[0]
+
     def take_snapshot(self, hwnd, max_w=1280):
         if not self.cfg["animations"] or self.app.fullscreen or hwnd in self.hidden:
             return
@@ -333,7 +354,7 @@ class WindowAnimator:
         g = window_geometry(hwnd)
         if g:
             self.geo[hwnd] = g
-        snap = snapshot(hwnd, max_w=max_w)
+        snap = self.grab_window(hwnd, max_w=max_w)
         if snap:
             self.snaps.pop(hwnd, None)
             self.snaps[hwnd] = (snap[0], self.to_logical(snap[1]))
@@ -350,7 +371,7 @@ class WindowAnimator:
         g = window_geometry(hwnd)
         if g:
             self.geo[hwnd] = g
-        snap = snapshot(hwnd)
+        snap = self.grab_window(hwnd)
         self.press_snap = (hwnd, time.monotonic(), (snap[0], self.to_logical(snap[1]))) if snap else None
 
     def fresh_snap(self, hwnd, max_age=2.0, take=False):

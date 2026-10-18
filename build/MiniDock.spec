@@ -13,6 +13,8 @@ a = Analysis(
         # карточки плееров в окне звука (системное API медиа Windows)
         "winrt.runtime", "winrt.windows.foundation", "winrt.windows.foundation.collections",
         "winrt.windows.media.control", "winrt.windows.storage.streams",
+        "winrt.windows.devices.radios", "winrt.windows.devices.bluetooth", "winrt.windows.devices.enumeration",
+        "winrt.windows.devices.bluetooth.genericattributeprofile",
     ],
     excludes=[
         # не используются — меньше размер установщика

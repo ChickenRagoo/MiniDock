@@ -41,7 +41,8 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-lp-folder": "MiniDock_TestLpFolder", "--show": "MiniDock_Show",
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
             "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
-            "--test-minimize": "MiniDock_TestMinimize", "--test-launch": "MiniDock_TestLaunch"}
+            "--test-minimize": "MiniDock_TestMinimize", "--test-launch": "MiniDock_TestLaunch",
+            "--test-bt": "MiniDock_TestBt"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -95,6 +96,10 @@ class App:
         self.memory_timer = QTimer(interval=3600 * 1000, timeout=self.memory_report)  # раз в час — в журнал
         self.memory_timer.start()
         QTimer.singleShot(60 * 1000, self.memory_report)  # и через минуту после запуска
+        # пока идёт полноэкранное (и 2 с после) — проверяем 20 раз в секунду: панель возвращается сразу,
+        # а окно, которое после выхода из полноэкранного на миг ложится под панель, тут же встаёт на место
+        self.fast_timer = QTimer(interval=50, timeout=self.fast_poll)
+        self.fast_until = 0.0
         self.poll_timer = QTimer(interval=1000, timeout=self.poll)
         self.poll_timer.start()
         # команды (--quit, --launchpad, …) ждёт отдельный поток — в простое он спит и не тратит ничего
@@ -385,6 +390,11 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-bt":  # окно Bluetooth под его значком (для проверки)
+            from .flyouts import BluetoothFlyout
+            hit = next((h for h in self.bar.hits if h[2] == "bt"), None)
+            if hit is not None:
+                self.bar.toggle_flyout(BluetoothFlyout, "bt", hit[0])
         elif flag == "--test-launch":  # запустить Блокнот так же, как из дока, с анимацией из иконки (для проверки)
             exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "notepad.exe")
             self.dock.reveal(2.0)
@@ -494,6 +504,28 @@ class App:
                 self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
                 QTimer.singleShot(4000, self.preview.close_preview)
 
+    def check_fullscreen(self):
+        full = foreground_is_fullscreen() and not self.launchpad.isVisible()
+        if full or self.fullscreen:
+            self.fast_until = time.monotonic() + 2.0
+            if not self.fast_timer.isActive():
+                self.fast_timer.start()
+        if full != self.fullscreen:
+            self.fullscreen = full
+            self.animator.set_enabled(not full)
+            for w in (self.dock, self.bar):
+                if full:
+                    w.hide()
+                elif w is self.dock or self.cfg["menubar"]:
+                    w.show()
+
+    def fast_poll(self):
+        self.check_fullscreen()
+        if self.want_area is not None and not self.fullscreen:
+            refit_maximized(win32gui.GetForegroundWindow(), self.want_area)
+        if time.monotonic() > self.fast_until:
+            self.fast_timer.stop()
+
     def poll(self):
         """Раз в секунду: панель задач, рабочая область, полноэкранные игры, список окон для дока."""
         if self.cfg["replace_taskbar"]:
@@ -503,15 +535,7 @@ class App:
                 self.taskbar.hide()
         if self.want_area is not None and get_work_area() != self.want_area:
             set_work_area(self.want_area)
-        full = foreground_is_fullscreen() and not self.launchpad.isVisible()
-        if full != self.fullscreen:
-            self.fullscreen = full
-            self.animator.set_enabled(not full)
-            for w in (self.dock, self.bar):
-                if full:
-                    w.hide()
-                elif w is self.dock or self.cfg["menubar"]:
-                    w.show()
+        self.check_fullscreen()
         # на дополнительных мониторах — то же самое, но для игры на их собственном экране
         game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None
         for w in list(self.extra_docks.values()) + list(self.extra_bars.values()):

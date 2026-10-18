@@ -541,6 +541,7 @@ class SettingsWindow(QWidget):
             self.toggle("clock_seconds", "Секунды в часах"),
             self.toggle("clock_date", "Дата рядом с часами"),
             self.toggle("show_battery", "Заряд аккумулятора", "Только на ноутбуках."),
+            self.toggle("show_bluetooth", "Bluetooth", "Значок появляется, если на компьютере есть Bluetooth-адаптер."),
         ])
         self.widgets_box = QVBoxLayout()
         self.widgets_box.setContentsMargins(0, 0, 0, 0)
