@@ -28,7 +28,7 @@ from .updater import Updater
 from .version import __version__
 from .winapi import (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
-                     force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, set_window_shadows,
+                     force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, refit_maximized, set_window_shadows,
                      set_work_area, taskbar_windows, user32, window_monitor, window_shadows)
 
 QUIT_EVENT = "MiniDock_Quit"
@@ -521,6 +521,9 @@ class App:
             elif not hide and not w.isVisible():
                 w.show()
         wins = app_windows()
+        if self.want_area is not None and not self.fullscreen:
+            for h in [h for hs in wins.values() for h in hs]:
+                refit_maximized(h, self.want_area)  # развёрнутое окно залезло под верхнюю панель — вернуть
         for d in self.docks():
             d.poll_windows(wins)
         self.animator.remember(wins)
@@ -532,6 +535,8 @@ class App:
         try:
             if event == EVENT_SYSTEM_FOREGROUND:
                 self.touch_mru(hwnd)
+                if self.want_area is not None and not self.fullscreen:
+                    refit_maximized(hwnd, self.want_area)  # сразу, не дожидаясь опроса раз в секунду
                 for bar in self.bars():
                     bar.on_foreground(hwnd)
                 QTimer.singleShot(400, lambda: self.animator.take_snapshot(hwnd))

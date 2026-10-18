@@ -481,6 +481,29 @@ def fullscreen_monitor():
     return int(mon) if _is_fullscreen_rect(rect, m, zoomed) else None
 
 
+def refit_maximized(hwnd, area):
+    """Развёрнутое окно на основном мониторе залезло под верхнюю панель (развернули, пока рабочую область
+    кто-то сбросил, — Windows уже развёрнутые окна сама не двигает): ставим его ровно в рабочую область,
+    окно остаётся развёрнутым. True — подвинули. Полноэкранные окна (F11, игры) без рамки не трогаем."""
+    try:
+        if not user32.IsZoomed(hwnd) or user32.IsIconic(hwnd) or not win32gui.IsWindowVisible(hwnd):
+            return False
+        mi = win32api.GetMonitorInfo(win32api.MonitorFromWindow(hwnd))
+        if not mi["Flags"] & 1:  # только основной монитор: на остальных место резервирует сама панель
+            return False
+        ml = mi["Monitor"][0]
+        l, t, r, b = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return False
+    border = ml - l  # невидимая рамка развёрнутого окна (обычно 7–8 px); у полноэкранного её нет
+    if border <= 0 or border > 32 or t >= area[1] - border - 1:
+        return False
+    al, at, ar, ab = area
+    win32gui.SetWindowPos(hwnd, 0, al - border, at - border, ar - al + 2 * border, ab - at + 2 * border,
+                          win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER)
+    return True
+
+
 def primary_monitor_rect():
     return win32api.GetMonitorInfo(win32api.MonitorFromPoint((0, 0), 1))["Monitor"]
 
