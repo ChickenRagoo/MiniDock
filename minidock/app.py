@@ -28,8 +28,8 @@ from .updater import Updater
 from .version import __version__
 from .winapi import (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
-                     force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, refit_maximized, set_window_shadows,
-                     set_work_area, taskbar_windows, user32, window_exe, window_monitor, window_shadows)
+                     force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, set_window_shadows,
+                     set_work_area, taskbar_windows, user32, window_monitor, window_shadows, appbar_lost)
 
 QUIT_EVENT = "MiniDock_Quit"
 # команды уже запущенному доку: MiniDock.pyw --launchpad / --settings (удобно повесить на ярлык)
@@ -55,7 +55,6 @@ class App:
         self.taskbar = Taskbar(self.cfg)
         self.peek_until = 0.0
         self.fullscreen = False
-        self.want_area = None
         self.settings = None
         self.mru = []  # окна в порядке последней активации (свежие в начале) — для Alt+Tab
 
@@ -86,9 +85,8 @@ class App:
                                       (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
 
-        self.refits = {}  # hwnd -> когда возвращали из-под панели
         self.started = time.monotonic()
-        self.stats = {"area": 0, "refit": 0}  # для строки в журнале: сколько раз чинили рабочую область и окна
+        self.stats = {"area": 0}  # для строки в журнале: сколько раз Проводник забывал про панели
         self._create_hook = None  # «окно создано» — только пока ждём запуска программы из дока (событий много)
 
         self.beat = time.monotonic()
@@ -138,7 +136,7 @@ class App:
             print(f"[{time.strftime('%Y-%m-%d %H:%M')}] MiniDock {__version__}: экраны {screens}; память {mem} МБ"
                   f" (помощник размытия {mb(helper)} МБ); снимки окон {len(an.snaps)} шт {mb(snaps)} МБ, свёрнутые"
                   f" {len(an.min_imgs)} шт {mb(mins)} МБ, кадр кнопок {mb(press)} МБ; слоёв анимации {len(an.gpus)};"
-                  f" рабочую область сбрасывали {self.stats['area']} раз, окна из-под панели {self.stats['refit']} раз;"
+                  f" панели регистрировали заново {self.stats['area']} раз;"
                   f" {caches}",
                   file=sys.stderr, flush=True)
         except Exception:
@@ -217,6 +215,8 @@ class App:
             self.bar.show()
         else:
             self.bar.hide()
+            if not cfg["menubar"]:
+                self.bar.release()
         self.place_extra_bars()
         self.dock.place()
         self.place_extra_docks()
@@ -224,7 +224,7 @@ class App:
             self.dock.show()
         self.dock.apply_glass()
         self.apply_shadows()
-        self.update_work_area()
+        self.forget_old_area()
         self.launchpad.update()
 
     @property
@@ -303,41 +303,28 @@ class App:
         if window_shadows() != want:
             set_window_shadows(want)
 
-    def update_work_area(self):
-        """Рабочая область: окна разворачиваются ровно под верхнюю панель и до края дока/экрана."""
-        cfg = self.cfg
-        if not cfg["replace_taskbar"] and not cfg["menubar"]:
-            if self.want_area is not None:
-                set_work_area(Taskbar.default_work_area())
-            self.want_area = None
-            return
-        dpr = QApplication.primaryScreen().devicePixelRatio()
-        mon = primary_monitor_rect()
-        l, t, r, b = mon if cfg["replace_taskbar"] else Taskbar.default_work_area()
-        if cfg["menubar"]:
-            t = mon[1] + round(self.bar_height() * dpr)
-        if cfg["replace_taskbar"] and not cfg["autohide"]:
-            thick = round(self.dock.reserve_thickness() * dpr)
-            if cfg["position"] == "bottom":
-                b -= thick
-            elif cfg["position"] == "left":
-                l += thick
-            else:
-                r -= thick
-        self.want_area = (l, t, r, b)
-        if get_work_area() != self.want_area:
-            set_work_area(self.want_area)
+    def forget_old_area(self):
+        """Прежние версии сами задавали рабочую область. Если сейчас не зарегистрировано ни одной панели,
+        Проводник её не пересчитает — возвращаем обычную один раз."""
+        if not any(w.reserved for w in self.bars() + self.docks()):
+            area = Taskbar.default_work_area()
+            if get_work_area() != tuple(area):
+                set_work_area(area)
+
+    def check_appbars(self):
+        """Проводник перезапустился — он забыл все панели: зарегистрировать заново."""
+        for w in self.bars() + self.docks():
+            if w.reserved and appbar_lost(int(w.winId())):
+                w.reserve()
+                self.stats["area"] += 1
 
     def cleanup(self):
-        for w in list(self.extra_bars.values()) + list(self.extra_docks.values()):  # вернуть зарезервированное место
-            w.release()
         self.animator.cleanup()
         self.keys.unhook()
         if self.taskbar.hidden or self.cfg.get("taskbar_orig_state") is not None:
             self.taskbar.restore()
-        if self.want_area is not None:
-            set_work_area(Taskbar.default_work_area())
-            self.want_area = None
+        for w in self.bars() + self.docks():  # Проводник вернёт обычную рабочую область
+            w.release()
         if self.cfg["shadows_orig"] is not None:
             if window_shadows() != self.cfg["shadows_orig"]:
                 set_window_shadows(self.cfg["shadows_orig"])
@@ -517,20 +504,6 @@ class App:
                 self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
                 QTimer.singleShot(4000, self.preview.close_preview)
 
-    def refit(self, hwnd):
-        """Вернуть развёрнутое окно из-под верхней панели — но не бороться с программой, которая сама ставит
-        окно на весь монитор: вернулось под панель дважды за 30 с — больше его не трогаем (иначе оно
-        «прыгает туда-сюда»)."""
-        now = time.monotonic()
-        times = [t for t in self.refits.get(hwnd, ()) if now - t < 30]
-        if len(times) >= 2:
-            return
-        if refit_maximized(hwnd, self.want_area):
-            self.refits[hwnd] = times + [now]
-            self.stats["refit"] += 1
-            if len(self.refits) > 200:
-                self.refits = {h: ts for h, ts in self.refits.items() if now - ts[-1] < 30}
-
     def check_fullscreen(self):
         full = foreground_is_fullscreen() and not self.launchpad.isVisible()
         if full or self.fullscreen:
@@ -548,8 +521,6 @@ class App:
 
     def fast_poll(self):
         self.check_fullscreen()
-        if self.want_area is not None and not self.fullscreen:
-            self.refit(win32gui.GetForegroundWindow())
         if time.monotonic() > self.fast_until:
             self.fast_timer.stop()
 
@@ -560,20 +531,9 @@ class App:
                 self.peek_until = 0.0
             if not self.peek_until and any(win32gui.IsWindowVisible(h) for h in taskbar_windows()):
                 self.taskbar.hide()
-        if self.want_area is not None and get_work_area() != self.want_area:
-            got = get_work_area()
-            set_work_area(self.want_area)
-            # кто-то сбросил рабочую область — в отчёт раз в час. Первые секунды не в счёт: это Windows
-            # пересчитывает её, пока мы прячем панель задач
-            if time.monotonic() - self.started > 20:
-                self.stats["area"] += 1
-            if 0 < self.stats["area"] <= 3 and time.monotonic() - self.started > 20 and sys.stderr is not None:
-                try:
-                    fg = window_exe(win32gui.GetForegroundWindow()) or "?"
-                except Exception:
-                    fg = "?"
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] рабочую область сбросили: {got} вместо {self.want_area};"
-                      f" активное окно {os.path.basename(fg)}", file=sys.stderr, flush=True)
+        self.ticks = getattr(self, "ticks", 0) + 1
+        if self.ticks % 5 == 0:
+            self.check_appbars()
         self.check_fullscreen()
         # на дополнительных мониторах — то же самое, но для игры на их собственном экране
         game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None
@@ -584,9 +544,6 @@ class App:
             elif not hide and not w.isVisible():
                 w.show()
         wins = app_windows()
-        if self.want_area is not None and not self.fullscreen:
-            for h in [h for hs in wins.values() for h in hs]:
-                self.refit(h)  # развёрнутое окно залезло под верхнюю панель — вернуть
         for d in self.docks():
             d.poll_windows(wins)
         self.animator.remember(wins)
@@ -598,8 +555,6 @@ class App:
         try:
             if event == EVENT_SYSTEM_FOREGROUND:
                 self.touch_mru(hwnd)
-                if self.want_area is not None and not self.fullscreen:
-                    self.refit(hwnd)  # сразу, не дожидаясь опроса раз в секунду
                 for bar in self.bars():
                     bar.on_foreground(hwnd)
                 QTimer.singleShot(400, lambda: self.animator.take_snapshot(hwnd))

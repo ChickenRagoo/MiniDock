@@ -884,6 +884,19 @@ def appbar_reserve(hwnd, rect, edge=1):
     shell32.SHAppBarMessage(3, ctypes.byref(abd))  # ABM_SETPOS
 
 
+def appbar_lost(hwnd):
+    """Проводник перезапускался (или сам снял регистрацию) и забыл про панель. ABM_NEW удаётся, только если
+    панели у него нет, — тогда она уже зарегистрирована заново, и True значит «место надо выставить снова»."""
+    abd = APPBARDATA()
+    abd.cbSize = ctypes.sizeof(APPBARDATA)
+    abd.hWnd = hwnd
+    abd.uCallbackMessage = 0x0400 + 77
+    if shell32.SHAppBarMessage(0, ctypes.byref(abd)):  # ABM_NEW
+        _appbars.pop(hwnd, None)
+        return True
+    return False
+
+
 def appbar_release(hwnd):
     _appbars.pop(hwnd, None)
     abd = APPBARDATA()

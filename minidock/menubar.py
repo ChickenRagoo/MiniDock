@@ -80,12 +80,17 @@ class MenuBar(QWidget):
         scr = self.home or QApplication.primaryScreen()
         g = scr.geometry()
         self.setGeometry(g.x(), g.y(), g.width(), self.H)
-        if self.home is not None:  # на основном мониторе место резервирует рабочая область, здесь — сама панель
-            _, (l, t, r, b) = window_monitor(int(self.winId()))
-            appbar_reserve(int(self.winId()), (l, t, r, t + round(self.H * scr.devicePixelRatio())))
-            self.reserved = True
+        self.reserve()
         self.apply_blur()
         self.update()
+
+    def reserve(self):
+        """Панель регистрируется в Windows так же, как панель задач (appbar): Windows сама не пускает под неё
+        развёрнутые окна. Двигать чужие окна и бороться с программами за место не приходится."""
+        scr = self.home or QApplication.primaryScreen()
+        _, (l, t, r, b) = window_monitor(int(self.winId()))
+        appbar_reserve(int(self.winId()), (l, t, r, t + round(self.H * scr.devicePixelRatio())))
+        self.reserved = True
 
     def release(self):
         if self.reserved:

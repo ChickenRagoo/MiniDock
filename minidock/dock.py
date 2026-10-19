@@ -222,11 +222,9 @@ class Dock(QWidget):
         return window_monitor(int(self.winId()))[0]
 
     def reserve(self):
-        """На дополнительном мониторе место под док (без автоскрытия) резервирует сам док —
-        на основном это делает рабочая область."""
-        if self.home is None:
-            return
-        if self.cfg["autohide"]:
+        """Место под док (без автоскрытия) резервирует сам док — как панель задач, через Windows.
+        На основном мониторе — только если док заменяет панель задач (иначе он стоит над ней)."""
+        if self.cfg["autohide"] or (self.home is None and not self.cfg["replace_taskbar"]):
             self.release()
             return
         _, (l, t, r, b) = window_monitor(int(self.winId()))
