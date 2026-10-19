@@ -21,8 +21,8 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 from .folders import FolderPopup, folder_pixmap
 from .ui import (GLASS, TOP_FLAGS, MacMenu, lerp_rect, live_for, make_glass, paint_background, popup_menu, precise_timer,
                  smooth)
-from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, resolve_lnk, syscommand,
-                     window_monitor)
+from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, launch, resolve_lnk,
+                     syscommand, window_monitor)
 
 
 class Item:
@@ -811,7 +811,7 @@ class Dock(QWidget):
         self.app.animator.expect_launch(it.exe, self.icon_screen_rect(it))
         try:
             folder = os.path.dirname(it.path) if os.path.isfile(it.path) else None
-            win32api.ShellExecute(0, "open", it.path, None, folder, win32con.SW_SHOWNORMAL)
+            launch(it.path, folder)
         except Exception as e:
             it.bounce_start = None
             print(f"[{time.strftime('%H:%M:%S')}] не запустилось из дока: {it.path}: {e}", file=sys.stderr, flush=True)

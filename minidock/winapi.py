@@ -348,6 +348,26 @@ def try_foreground(hwnd):
         return False
 
 
+_elevated = None
+
+
+def launch(path, folder=None):
+    """Запустить программу или файл как обычный пользователь. Если MiniDock работает с правами администратора,
+    запущенное из него унаследовало бы их (так Telegram становился «от администратора», и потом обычный
+    MiniDock не мог его развернуть) — тогда запускаем через Проводник, как это делает панель задач."""
+    global _elevated
+    if _elevated is None:
+        try:
+            _elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            _elevated = False
+    if _elevated:
+        import subprocess
+        subprocess.Popen(["explorer.exe", path], creationflags=0x08000000)  # CREATE_NO_WINDOW
+        return
+    win32api.ShellExecute(0, "open", path, None, folder, win32con.SW_SHOWNORMAL)
+
+
 def force_foreground(hwnd):
     """Выводит окно на передний план, обходя ограничения Windows на смену фокуса."""
     try:

@@ -15,7 +15,7 @@ from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, 
 from PySide6.QtWidgets import QApplication, QFileIconProvider, QLineEdit, QMessageBox, QWidget
 
 from .ui import MDL2, animate, fade_in, make_glass, paint_background, prepare_glass, rounded_path
-from .winapi import enable_blur, force_foreground, round_window, user32
+from .winapi import enable_blur, force_foreground, launch, round_window, user32
 
 ROW_H, HEAD_H, TOP_H, WIDTH, MAX_ROWS = 40, 24, 62, 720, 11
 SKIP_PARTS = ("\\appdata\\", "\\.", "\\node_modules\\", "\\$recycle.bin\\", "\\__pycache__\\")
@@ -291,7 +291,7 @@ class Spotlight(QWidget):
             for f in self.files:
                 folder = os.path.dirname(f["path"])
                 res.append(dict(section="Документы и папки", title=f["name"], sub=folder, icon_kind="file",
-                                icon=f["path"], action=lambda p=f["path"]: os.startfile(p),
+                                icon=f["path"], action=lambda p=f["path"]: launch(p),
                                 alt=lambda p=f["path"]: subprocess.Popen(["explorer.exe", "/select,", p]),
                                 file=f))
             res.append(dict(section="Интернет", title=f"Искать «{text}» в интернете", sub="Google",

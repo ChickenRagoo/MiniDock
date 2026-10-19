@@ -42,7 +42,7 @@ COMMANDS = {"--launchpad": "MiniDock_Launchpad", "--settings": "MiniDock_Setting
             "--test-volume": "MiniDock_TestVolume", "--test-close": "MiniDock_TestClose",
             "--test-peek": "MiniDock_TestPeek", "--test-clock": "MiniDock_TestClock",
             "--test-minimize": "MiniDock_TestMinimize", "--test-launch": "MiniDock_TestLaunch",
-            "--test-bt": "MiniDock_TestBt"}
+            "--test-bt": "MiniDock_TestBt", "--test-click-tg": "MiniDock_TestClickTg"}
 SHOW_ACK = "MiniDock_ShowAck"
 LAYOUT_KEYS = {"replace_taskbar", "menubar", "bar_height", "position", "icon_size", "magnify", "margin", "autohide"}
 
@@ -397,6 +397,11 @@ class App:
             QTimer.singleShot(700, lambda: self.switcher.arrow(0x28))
             QTimer.singleShot(1100, lambda: self.switcher.arrow(0x27))
             QTimer.singleShot(4000, self.switcher.cancel)
+        elif flag == "--test-click-tg":  # клик по иконке Telegram в доке тем же путём, что мышью (для проверки)
+            it = next((i for i in self.dock.items() if "telegram" in (i.exe or i.path or "").lower()), None)
+            print(f"test-click-tg: item={it and it.kind} hwnds={it and it.hwnds}", file=sys.stderr, flush=True)
+            if it is not None:
+                self.dock.activate(it)
         elif flag == "--test-bt":  # окно Bluetooth под его значком (для проверки)
             from .flyouts import BluetoothFlyout
             hit = next((h for h in self.bar.hits if h[2] == "bt"), None)
@@ -613,7 +618,9 @@ class App:
     def focus_windows(self, item, hwnds):
         """Клик по иконке запущенной программы: развернуть / переключить окно / свернуть."""
         fg = win32gui.GetForegroundWindow()
-        if fg in hwnds:
+        # свёрнутое окно Windows иногда оставляет «активным» (фокус никому не передался) — это не «уже впереди»:
+        # иначе клик по иконке пытался свернуть уже свёрнутое окно и ничего не происходило
+        if fg in hwnds and not win32gui.IsIconic(fg):
             if len(hwnds) == 1:
                 self.animator.minimize(fg)
                 return
@@ -687,6 +694,9 @@ def main(script):
         if flag in sys.argv:
             signal_running(name)
             return
+    from . import elevation
+    if elevation.relaunch_if_needed():
+        return  # продолжит экземпляр с правами администратора
     try:
         mutex = win32event.CreateMutex(open_security(), False, "MiniDock_SingleInstance")
         exists = win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS

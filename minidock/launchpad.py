@@ -27,7 +27,7 @@ from .config import CFG_DIR, ICON_CACHE
 from . import uninstall
 from .folders import folder_image
 from .ui import MacMenu, animate, clamp, ease_out, lerp, paint_background, per_frame, popup_menu, precise_timer, smooth
-from .winapi import enable_blur, enum_start_apps, force_foreground, resolve_lnk, shell_icon_image
+from .winapi import enable_blur, enum_start_apps, force_foreground, launch, resolve_lnk, shell_icon_image
 
 JUNK = re.compile(r"(uninstall|деинстал|удален|удалить|readme|read me|release notes|help|справк|documentation|"
                   r"документац|website|web site|веб-сайт|сайт|license|лиценз|support|поддержк|manual|руководств|"
@@ -927,15 +927,15 @@ class Launchpad(QWidget):
         parse = e["parse"]
         try:
             if os.path.isfile(parse):
-                win32api.ShellExecute(0, "open", parse, None, os.path.dirname(parse), win32con.SW_SHOWNORMAL)
+                launch(parse, os.path.dirname(parse))
                 return
         except Exception:
             pass
         try:  # запасной путь — как запускает сам «Пуск»: по ID приложения
-            os.startfile("shell:AppsFolder\\" + parse)
+            launch("shell:AppsFolder\\" + parse)
         except Exception:
             try:
-                os.startfile(parse)
+                launch(parse)
             except Exception:
                 pass
 

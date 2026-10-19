@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from xml.sax.saxutils import escape
 
 import win32con
@@ -116,6 +117,28 @@ def enable():
 
 def disable():
     return _run_elevated("schtasks.exe", f'/Delete /TN "{TASK}" /F') == 0
+
+
+def relaunch_if_needed():
+    """Режим администратора включён, а MiniDock запустили без прав (автообновление, ярлык, повторный запуск).
+    Без прав он не может управлять окнами программ, запущенных от администратора (не разворачивает их,
+    Alt+Tab над ними становится системным). Запускаем задание (UAC не спросит — его уже разрешили) и выходим.
+    True — перезапуск начат, этому экземпляру надо закрыться."""
+    if not getattr(sys, "frozen", False) or is_elevated() or not task_exists():
+        return False
+    marker = os.path.join(tempfile.gettempdir(), "MiniDock_elevate.txt")
+    try:  # защита от круга: если задание почему-то запустило нас снова без прав — второй раз не пробуем
+        if time.time() - os.path.getmtime(marker) < 30:
+            return False
+    except OSError:
+        pass
+    try:
+        with open(marker, "w") as f:
+            f.write("1")
+        return subprocess.run(["schtasks", "/Run", "/TN", TASK], capture_output=True,
+                              creationflags=NO_WINDOW).returncode == 0
+    except OSError:
+        return False
 
 
 def restart_elevated():

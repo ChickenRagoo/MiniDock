@@ -938,7 +938,10 @@ class WidgetHost(QObject):
                         data = inst.update(wid in self.detailed)
                     except Exception as e:
                         data = {"__error__": str(e)[:200]}
-                    self._data.emit(wid, data)
+                    try:
+                        self._data.emit(wid, data)
+                    except RuntimeError:  # MiniDock закрывается — получателя уже нет
+                        return
                     self.due[wid] = time.monotonic() + max(float(inst.interval), 0.5)
                 nearest = min(nearest, self.due[wid] - time.monotonic())
             self.wake.wait(max(nearest, 0.05))
