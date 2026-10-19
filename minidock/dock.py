@@ -6,6 +6,7 @@
 import math
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -811,8 +812,9 @@ class Dock(QWidget):
         try:
             folder = os.path.dirname(it.path) if os.path.isfile(it.path) else None
             win32api.ShellExecute(0, "open", it.path, None, folder, win32con.SW_SHOWNORMAL)
-        except Exception:
+        except Exception as e:
             it.bounce_start = None
+            print(f"[{time.strftime('%H:%M:%S')}] не запустилось из дока: {it.path}: {e}", file=sys.stderr, flush=True)
 
     # -- pin management
     @staticmethod

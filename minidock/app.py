@@ -154,10 +154,10 @@ class App:
     def heartbeat(self):
         self.beat = time.monotonic()
         # Второй сторож — внутри Python на C: срабатывает, даже если зависший вызов держит GIL и поток
-        # watchdog() стоит вместе со всеми. Каждую секунду переводим его на 30 с вперёд.
+        # watchdog() стоит вместе со всеми. Каждую секунду переводим его на 3 с вперёд.
         if sys.stderr is not None:
             try:
-                faulthandler.dump_traceback_later(30, file=sys.stderr)
+                faulthandler.dump_traceback_later(3, file=sys.stderr)  # даже короткий фриз — в журнал со стеками
             except Exception:
                 pass
 

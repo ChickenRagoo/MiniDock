@@ -74,7 +74,18 @@ class KeyHook(QObject):
             user32.UnhookWindowsHookEx(self.hook)
             self.hook = None
 
+    def unstick(self):
+        """Хук на миг сняли (Windows так делает, если программа не ответила вовремя) — и мы не увидели, как
+        отпустили Alt или Win. Тогда навсегда оставались «посреди Alt+Tab»: клавиши глотались, хук не
+        переставлялся, Alt+Tab становился системным. Клавиша на самом деле отпущена — выходим из режима."""
+        if self.switching and not key_down(VK_MENU):
+            self.switching = False
+            self.later("commit")
+        if self.win_down and not (key_down(VK_LWIN) or key_down(VK_RWIN)):
+            self.win_down = False
+
     def rehook(self):
+        self.unstick()
         if self.switching or self.win_down:
             return  # посреди Alt+Tab или нажатой Win не трогаем
         new = user32.SetWindowsHookExW(13, self._proc, kernel32.GetModuleHandleW(None), 0)
@@ -139,6 +150,8 @@ class KeyHook(QObject):
 
     def handle(self, vk, down):
         cfg = self.app.cfg
+        if vk not in (VK_MENU, VK_LMENU, VK_RMENU, VK_LWIN, VK_RWIN):
+            self.unstick()
         if vk == VK_TAB and cfg["custom_switcher"]:
             if down and (self.switching or key_down(VK_MENU)):
                 direction = -1 if key_down(VK_SHIFT) else 1
