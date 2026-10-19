@@ -441,8 +441,13 @@ class Dock(QWidget):
                 pass  # живой фон: обновляется сам, пока док на экране
         elif self.glass.live_on:
             self.glass.stop_live()  # док спрятан — фон под ним снимать незачем
-        if target_hide == 0.0 and self.hide_k >= 0.99 and self.glass.enabled and not self.glass.live_on:
-            self.glass.refresh()  # док начинает выезжать — свежий фон, пока его ещё нет на экране
+        if target_hide == 0.0 and self.hide_k >= 0.99:
+            # док начинает выезжать: снова поверх всех «поверх всех» окон — оверлеи игр, записи экрана и плееры
+            # тоже делают себя такими и могли оказаться выше, тогда док выезжал под ними
+            win32gui.SetWindowPos(int(self.winId()), win32con.HWND_TOPMOST, 0, 0, 0, 0,
+                                  win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_NOACTIVATE)
+            if self.glass.enabled and not self.glass.live_on:
+                self.glass.refresh()  # свежий фон, пока дока ещё нет на экране
         if self.hide_k != target_hide:
             self.hide_k += (target_hide - self.hide_k) * smooth(0.2, self.anim.dt)
             if abs(self.hide_k - target_hide) < 0.01:
@@ -592,9 +597,11 @@ class Dock(QWidget):
                 continue
             it = old.get(exe)
             if it is None:
-                it = self.icon_cache.get(exe) or Item.from_path(exe, kind="running")
-                self.icon_cache[exe] = it
+                it = self.icon_cache.pop(exe, None) or Item.from_path(exe, kind="running")
+                self.icon_cache[exe] = it  # в конец: самые давние — в начале
                 it.cur = None
+                while len(self.icon_cache) > 48:  # за день запускается много программ — держим последние
+                    self.icon_cache.pop(next(iter(self.icon_cache)))
             it.hwnds = hwnds
             it.seen_at = now
             running.append(it)
@@ -604,6 +611,9 @@ class Dock(QWidget):
             if it not in running and exe not in claimed and now - getattr(it, "seen_at", 0) < 3:
                 it.hwnds = [h for h in it.hwnds if win32gui.IsWindow(h)]
                 running.insert(min(self.running.index(it), len(running)), it)
+        for it in self.running:
+            if it not in running:
+                it.pix_cache = {}  # программа закрылась — уменьшенные копии иконки больше не нужны
         self.running = running
         # перерисовываем, только если что-то видимое поменялось (иконки или точки запущенных)
         signature = tuple((id(it), bool(it.hwnds)) for it in self.items())

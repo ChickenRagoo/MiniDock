@@ -2,6 +2,7 @@
 import ctypes
 import os
 import sys
+import threading
 import winreg
 from ctypes import wintypes
 from pathlib import Path
@@ -499,8 +500,11 @@ def refit_maximized(hwnd, area):
     if border <= 0 or border > 32 or t >= area[1] - border - 1:
         return False
     al, at, ar, ab = area
-    win32gui.SetWindowPos(hwnd, 0, al - border, at - border, ar - al + 2 * border, ab - at + 2 * border,
-                          win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER)
+    try:  # окно программы, запущенной от администратора, Windows двигать не даёт — тогда просто не трогаем
+        win32gui.SetWindowPos(hwnd, 0, al - border, at - border, ar - al + 2 * border, ab - at + 2 * border,
+                              win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER)
+    except Exception:
+        return False
     return True
 
 
@@ -570,6 +574,14 @@ def window_aspect(hwnd):
     return 16 / 10
 
 
+def responds(hwnd, ms=30):
+    """Отвечает ли поток окна на сообщения прямо сейчас (ждём не дольше ms). Менять стиль чужого окна —
+    синхронный вызов: пока программа занята (только что создала окно и ещё грузится), наш поток ждал её
+    секундами, и все анимации MiniDock замирали."""
+    res = ctypes.c_size_t()
+    return bool(user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 0x0002, ms, ctypes.byref(res)))  # WM_NULL, ABORTIFHUNG
+
+
 def make_invisible(hwnd):
     """Делает чужое окно полностью прозрачным (оно остаётся «живым» для DWM-миниатюр).
 
@@ -578,7 +590,7 @@ def make_invisible(hwnd):
     """
     try:
         ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-        if ex & win32con.WS_EX_LAYERED:
+        if ex & win32con.WS_EX_LAYERED or not responds(hwnd):
             return None
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex | win32con.WS_EX_LAYERED)
         win32gui.SetLayeredWindowAttributes(hwnd, 0, 0, win32con.LWA_ALPHA)
@@ -588,6 +600,13 @@ def make_invisible(hwnd):
 
 
 def make_visible(hwnd, ex):
+    if not responds(hwnd):  # программа занята — вернём видимость в фоне, не задерживая интерфейс
+        threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True).start()
+        return
+    _make_visible(hwnd, ex)
+
+
+def _make_visible(hwnd, ex):
     try:
         win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_ALPHA)
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex)

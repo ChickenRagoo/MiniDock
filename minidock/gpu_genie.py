@@ -9,6 +9,7 @@ import time
 import win32con
 import win32gui
 
+import shiboken6
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QPainter, QSurfaceFormat
 from PySide6.QtQuick import (QQuickItem, QQuickWindow, QSGGeometry, QSGGeometryNode, QSGNode, QSGOpacityNode,
@@ -92,6 +93,17 @@ class GenieItem(QQuickItem):
         return dict(attrs=attrs, geo=geo, gn=gn, mat=mat, tex=tex, blank=tex, op=op, anim=None, tex_for=None,
                     tex_ver=0, buf=None)
 
+    @staticmethod
+    def swap_texture(s, tex):
+        """Поставить материалу слота новую текстуру, а старую удалить. Текстура из createTextureFromImage
+        принадлежит нам, но PySide сам её не удаляет: каждая анимация оставляла в памяти снимок окна
+        со всеми уменьшенными копиями (~12 МБ на свёртывание и разворачивание — сотни МБ за день)."""
+        old = s["tex"]
+        s["mat"].setTexture(tex)
+        s["tex"] = tex
+        if old is not None and old is not tex and old is not s["blank"]:
+            shiboken6.delete(old)  # поток рендера, синхронизация — здесь удалять можно
+
     def updatePaintNode(self, node, data):
         if node is None:
             node = QSGNode()
@@ -115,14 +127,14 @@ class GenieItem(QQuickItem):
                     geo.allocate(0)
                     s["gn"].markDirty(QSGNode.DirtyGeometry)
                 if s["tex_for"] is not None:  # отпускаем большую текстуру снимка
-                    s["mat"].setTexture(s["blank"])
-                    s["tex"], s["tex_for"] = s["blank"], None
+                    self.swap_texture(s, s["blank"])
+                    s["tex_for"] = None
                     s["gn"].markDirty(QSGNode.DirtyMaterial)
                 continue
             if s["tex_for"] is not a or s["tex_ver"] != a["ver"]:  # новая анимация или свежий снимок окна
                 tex = self.window().createTextureFromImage(a["img"], QQuickWindow.TextureHasMipmaps)
-                s["mat"].setTexture(tex)
-                s["tex"], s["tex_for"], s["tex_ver"] = tex, a, a["ver"]
+                self.swap_texture(s, tex)
+                s["tex_for"], s["tex_ver"] = a, a["ver"]
                 s["gn"].markDirty(QSGNode.DirtyMaterial)
             g, opacity = self.owner.progress(a, now)
             rows = self.owner.rows(a, g)

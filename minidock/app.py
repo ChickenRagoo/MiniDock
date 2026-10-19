@@ -86,6 +86,8 @@ class App:
                                       (EVENT_SYSTEM_CAPTURESTART, EVENT_SYSTEM_CAPTURESTART),
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
 
+        self.refits = {}  # hwnd -> когда возвращали из-под панели
+        self.stats = {"area": 0, "refit": 0}  # для строки в журнале: сколько раз чинили рабочую область и окна
         self._create_hook = None  # «окно создано» — только пока ждём запуска программы из дока (событий много)
 
         self.beat = time.monotonic()
@@ -129,9 +131,14 @@ class App:
             mins = sum(img.sizeInBytes() for img in an.min_imgs.values())
             press = an.press_snap[2][0].sizeInBytes() if an.press_snap else 0
             mem = mb(me.memory_full_info().private)
+            import gc
+            caches = (f"иконки дока {sum(len(d.icon_cache) for d in self.docks())}, Alt+Tab"
+                      f" {len(self.mac_switcher.icons)}, объектов Python {len(gc.get_objects())}")
             print(f"[{time.strftime('%Y-%m-%d %H:%M')}] MiniDock {__version__}: экраны {screens}; память {mem} МБ"
                   f" (помощник размытия {mb(helper)} МБ); снимки окон {len(an.snaps)} шт {mb(snaps)} МБ, свёрнутые"
-                  f" {len(an.min_imgs)} шт {mb(mins)} МБ, кадр кнопок {mb(press)} МБ; слоёв анимации {len(an.gpus)}",
+                  f" {len(an.min_imgs)} шт {mb(mins)} МБ, кадр кнопок {mb(press)} МБ; слоёв анимации {len(an.gpus)};"
+                  f" рабочую область сбрасывали {self.stats['area']} раз, окна из-под панели {self.stats['refit']} раз;"
+                  f" {caches}",
                   file=sys.stderr, flush=True)
         except Exception:
             pass
@@ -504,6 +511,20 @@ class App:
                 self.preview.open(it, QRectF(tl.x(), tl.y(), w.width(), w.height()))
                 QTimer.singleShot(4000, self.preview.close_preview)
 
+    def refit(self, hwnd):
+        """Вернуть развёрнутое окно из-под верхней панели — но не бороться с программой, которая сама ставит
+        окно на весь монитор: вернулось под панель дважды за 30 с — больше его не трогаем (иначе оно
+        «прыгает туда-сюда»)."""
+        now = time.monotonic()
+        times = [t for t in self.refits.get(hwnd, ()) if now - t < 30]
+        if len(times) >= 2:
+            return
+        if refit_maximized(hwnd, self.want_area):
+            self.refits[hwnd] = times + [now]
+            self.stats["refit"] += 1
+            if len(self.refits) > 200:
+                self.refits = {h: ts for h, ts in self.refits.items() if now - ts[-1] < 30}
+
     def check_fullscreen(self):
         full = foreground_is_fullscreen() and not self.launchpad.isVisible()
         if full or self.fullscreen:
@@ -522,7 +543,7 @@ class App:
     def fast_poll(self):
         self.check_fullscreen()
         if self.want_area is not None and not self.fullscreen:
-            refit_maximized(win32gui.GetForegroundWindow(), self.want_area)
+            self.refit(win32gui.GetForegroundWindow())
         if time.monotonic() > self.fast_until:
             self.fast_timer.stop()
 
@@ -535,6 +556,7 @@ class App:
                 self.taskbar.hide()
         if self.want_area is not None and get_work_area() != self.want_area:
             set_work_area(self.want_area)
+            self.stats["area"] += 1  # кто-то сбросил рабочую область — в отчёт раз в час
         self.check_fullscreen()
         # на дополнительных мониторах — то же самое, но для игры на их собственном экране
         game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None
@@ -547,7 +569,7 @@ class App:
         wins = app_windows()
         if self.want_area is not None and not self.fullscreen:
             for h in [h for hs in wins.values() for h in hs]:
-                refit_maximized(h, self.want_area)  # развёрнутое окно залезло под верхнюю панель — вернуть
+                self.refit(h)  # развёрнутое окно залезло под верхнюю панель — вернуть
         for d in self.docks():
             d.poll_windows(wins)
         self.animator.remember(wins)
@@ -560,7 +582,7 @@ class App:
             if event == EVENT_SYSTEM_FOREGROUND:
                 self.touch_mru(hwnd)
                 if self.want_area is not None and not self.fullscreen:
-                    refit_maximized(hwnd, self.want_area)  # сразу, не дожидаясь опроса раз в секунду
+                    self.refit(hwnd)  # сразу, не дожидаясь опроса раз в секунду
                 for bar in self.bars():
                     bar.on_foreground(hwnd)
                 QTimer.singleShot(400, lambda: self.animator.take_snapshot(hwnd))

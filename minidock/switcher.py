@@ -254,6 +254,8 @@ class Switcher(QWidget):
             return it
         if exe not in self.icons:
             self.icons[exe] = Item.from_path(exe, kind="running")
+            while len(self.icons) > 48:
+                self.icons.pop(next(iter(self.icons)))
         return self.icons[exe]
 
     def collect(self):

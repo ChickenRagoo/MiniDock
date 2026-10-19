@@ -305,7 +305,7 @@ def _bg_pixmap(path, w, h):
             src = _bg_source[path] = img
         img = src.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
         img = img.copy((img.width() - w) // 2, (img.height() - h) // 2, w, h)  # по центру, как обои
-        if len(_bg_scaled) > 48:
+        if len(_bg_scaled) > 12:
             _bg_scaled.clear()
         pix = _bg_scaled[key] = QPixmap.fromImage(img)
     return pix
