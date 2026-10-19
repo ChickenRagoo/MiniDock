@@ -19,7 +19,7 @@ from .flyouts import (BatteryFlyout, BluetoothFlyout, ClockFlyout, LangFlyout, T
                       volume_endpoint,
                       volume_glyph)
 from .ui import MDL2, TOP_FLAGS, MacMenu, ease_out, paint_background, per_frame, popup_menu, precise_timer, smooth
-from .winapi import (app_windows, appbar_release, appbar_reserve, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
+from .winapi import (window_monitor, app_windows, appbar_release, appbar_reserve, enable_blur, exe_description, force_foreground, keyboard_lang, press_keys,
                      syscommand, user32, window_exe)
 
 DAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
@@ -81,9 +81,8 @@ class MenuBar(QWidget):
         g = scr.geometry()
         self.setGeometry(g.x(), g.y(), g.width(), self.H)
         if self.home is not None:  # на основном мониторе место резервирует рабочая область, здесь — сама панель
-            dpr = scr.devicePixelRatio()
-            x, y = round(g.x() * dpr), round(g.y() * dpr)
-            appbar_reserve(int(self.winId()), (x, y, x + round(g.width() * dpr), y + round(self.H * dpr)))
+            _, (l, t, r, b) = window_monitor(int(self.winId()))
+            appbar_reserve(int(self.winId()), (l, t, r, t + round(self.H * scr.devicePixelRatio())))
             self.reserved = True
         self.apply_blur()
         self.update()

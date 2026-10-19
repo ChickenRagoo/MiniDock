@@ -94,11 +94,14 @@ class Updater(QObject):
             return f"Устанавливаем версию {self.latest}…"
         if s == "error":
             return f"Не удалось проверить обновления: {self.error}"
+        if s == "blocked":
+            return (f"Windows (Smart App Control) не даёт поставить версию {self.latest} автоматически."
+                    " Скачайте установщик со страницы MiniDock на GitHub и запустите его вручную.")
         return f"Версия {__version__}."
 
     # -- проверка и скачивание (в фоне)
     def check(self):
-        if self.busy or not self.configured or self.state in ("ready", "installing"):
+        if self.busy or not self.configured or self.state in ("ready", "installing", "blocked"):
             return
         self.busy = True
         self.state = "checking"
@@ -182,5 +185,12 @@ class Updater(QObject):
         self.state = "installing"
         self.changed.emit()
         # установщик закроет MiniDock (вернёт панель задач), обновит файлы и запустит новую версию
-        subprocess.Popen([self.installer, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"],
-                         creationflags=subprocess.DETACHED_PROCESS)
+        try:
+            subprocess.Popen([self.installer, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"],
+                             creationflags=subprocess.DETACHED_PROCESS)
+        except OSError as e:
+            # «Интеллектуальное управление приложениями» (Smart App Control) не даёт запустить неподписанный
+            # установщик (WinError 4551) — автоматически не поставить, только вручную
+            self.state = "blocked" if getattr(e, "winerror", 0) == 4551 else "error"
+            self.error = str(e)[:120]
+            self.changed.emit()

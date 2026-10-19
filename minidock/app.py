@@ -29,7 +29,7 @@ from .version import __version__
 from .winapi import (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
                      force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, primary_monitor_rect, refit_maximized, set_window_shadows,
-                     set_work_area, taskbar_windows, user32, window_monitor, window_shadows)
+                     set_work_area, taskbar_windows, user32, window_exe, window_monitor, window_shadows)
 
 QUIT_EVENT = "MiniDock_Quit"
 # команды уже запущенному доку: MiniDock.pyw --launchpad / --settings (удобно повесить на ярлык)
@@ -87,6 +87,7 @@ class App:
                                       (EVENT_OBJECT_SHOW, EVENT_OBJECT_HIDE))]
 
         self.refits = {}  # hwnd -> когда возвращали из-под панели
+        self.started = time.monotonic()
         self.stats = {"area": 0, "refit": 0}  # для строки в журнале: сколько раз чинили рабочую область и окна
         self._create_hook = None  # «окно создано» — только пока ждём запуска программы из дока (событий много)
 
@@ -560,8 +561,19 @@ class App:
             if not self.peek_until and any(win32gui.IsWindowVisible(h) for h in taskbar_windows()):
                 self.taskbar.hide()
         if self.want_area is not None and get_work_area() != self.want_area:
+            got = get_work_area()
             set_work_area(self.want_area)
-            self.stats["area"] += 1  # кто-то сбросил рабочую область — в отчёт раз в час
+            # кто-то сбросил рабочую область — в отчёт раз в час. Первые секунды не в счёт: это Windows
+            # пересчитывает её, пока мы прячем панель задач
+            if time.monotonic() - self.started > 20:
+                self.stats["area"] += 1
+            if 0 < self.stats["area"] <= 3 and time.monotonic() - self.started > 20 and sys.stderr is not None:
+                try:
+                    fg = window_exe(win32gui.GetForegroundWindow()) or "?"
+                except Exception:
+                    fg = "?"
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] рабочую область сбросили: {got} вместо {self.want_area};"
+                      f" активное окно {os.path.basename(fg)}", file=sys.stderr, flush=True)
         self.check_fullscreen()
         # на дополнительных мониторах — то же самое, но для игры на их собственном экране
         game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None

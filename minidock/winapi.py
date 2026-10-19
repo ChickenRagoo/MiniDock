@@ -854,9 +854,16 @@ def appbar_state(hwnd, new_state=None):
     shell32.SHAppBarMessage(10, ctypes.byref(abd))  # ABM_SETSTATE
 
 
+_appbars = {}
+
+
 def appbar_reserve(hwnd, rect, edge=1):
     """Зарезервировать полосу rect (l, t, r, b, физические пиксели) у верхнего края монитора:
     развёрнутые окна на этом мониторе не будут заходить под панель."""
+    rect = tuple(int(v) for v in rect)
+    if _appbars.get(hwnd) == (rect, edge):
+        return  # уже зарезервировано ровно так — повтор только дёрнул бы окна на всех мониторах
+    _appbars[hwnd] = (rect, edge)
     abd = APPBARDATA()
     abd.cbSize = ctypes.sizeof(APPBARDATA)
     abd.hWnd = hwnd
@@ -878,6 +885,7 @@ def appbar_reserve(hwnd, rect, edge=1):
 
 
 def appbar_release(hwnd):
+    _appbars.pop(hwnd, None)
     abd = APPBARDATA()
     abd.cbSize = ctypes.sizeof(APPBARDATA)
     abd.hWnd = hwnd
