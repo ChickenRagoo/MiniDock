@@ -1839,7 +1839,7 @@ class VpnDialog(QDialog):
             c = VpnCard(i, v)
             c.online = self.online.get(v.get("name"), False)
             c.chosen.connect(self.select)
-            c.moved.connect(self.move)
+            c.moved.connect(self.move_vpn)
             self.cards_box.addWidget(c)
             self.cards.append(c)
             if i == self.cur:
@@ -1871,7 +1871,7 @@ class VpnDialog(QDialog):
         card._out = animate(card, 200, lambda v: card.setFixedHeight(max(0, int(62 * (1 - v)))), done,
                             curve=QEasingCurve.InCubic)
 
-    def move(self, row, step):
+    def move_vpn(self, row, step):
         new = row + step
         if not 0 <= new < len(self.cfg["vpns"]):
             return
