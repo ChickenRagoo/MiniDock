@@ -10,8 +10,10 @@ VPN мешает (банк, Госуслуги, маркетплейсы).
     Программа    — просто .exe любого VPN-клиента; как им управлять, виджет решает сам:
                    WireGuard, AmneziaWG, OpenVPN GUI — включает их туннели напрямую;
                    Cloudflare WARP, Mullvad, Windscribe, NordVPN — через их командную строку;
-                   остальные (Amnezia VPN, Hiddify, v2rayN, Happ, Proton…) — запускает программу, когда VPN нужен,
-                   и закрывает, когда нет (в самой программе надо включить «подключаться при запуске»)
+                   zapret (.bat стратегии) — запускает стратегию и закрывает winws.exe (или службу zapret);
+                   Proxifier — запускает с выбранным профилем .ppx (Proxyline и другие прокси) и закрывает;
+                   остальные (Happ, Amnezia VPN, Hiddify, v2rayN, Proton…) — запускает программу свёрнутой, когда VPN
+                   нужен, и закрывает вместе с ядром, когда нет (в программе надо включить автоподключение при запуске)
     Windows VPN  — подключения из «Параметры → Сеть → VPN» (имя подключения как там)
     WireGuard    — файл туннеля .conf (WireGuard для Windows)
     AmneziaWG    — файл туннеля .conf (клиент AmneziaWG; такой файл можно выгрузить и из Amnezia VPN)
@@ -141,9 +143,50 @@ CLI_CLIENTS = [
 ]
 
 
+def zapret_root(path):
+    """Папка zapret (сборка Flowseal и похожие), если path — её .bat или winws.exe; иначе None."""
+    folder = os.path.dirname(path or "")
+    for base in (folder, os.path.dirname(folder)):
+        if base and os.path.isfile(os.path.join(base, "bin", "winws.exe")):
+            return base
+    return None
+
+
+def zapret_strategies(root):
+    """[(название, путь .bat)] стратегий zapret: general.bat и его варианты (ALT, FAKE TLS…)."""
+    try:
+        bats = [f for f in os.listdir(root) if f.lower().startswith("general") and f.lower().endswith(".bat")]
+    except OSError:
+        return []
+    bats.sort(key=lambda f: (f.lower() != "general.bat", f.lower()))
+    return [(f[:-4], os.path.join(root, f)) for f in bats]
+
+
+PROXIFIER_EXE = (r"%ProgramFiles(x86)%\Proxifier\Proxifier.exe", r"%ProgramFiles%\Proxifier\Proxifier.exe",
+                 r"%ProgramFiles(x86)%\Proxifier PE\Proxifier.exe", r"%ProgramFiles%\Proxifier PE\Proxifier.exe",
+                 "Proxifier.exe")
+
+
+def proxifier_profiles():
+    """[(название, путь .ppx)] профилей Proxifier (v4 и v3)."""
+    out = []
+    for base in (r"%APPDATA%\Proxifier4\Profiles", r"%APPDATA%\Proxifier\Profiles"):
+        folder = os.path.expandvars(base)
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        out += [(f[:-4], os.path.join(folder, f)) for f in names if f.lower().endswith(".ppx")]
+    return out
+
+
 def detect(exe):
-    """Как управлять VPN-программой: {"mode": "tunnel" | "cli" | "process", ...}."""
+    """Как управлять VPN-программой: {"mode": "tunnel" | "cli" | "zapret" | "proxifier" | "process", ...}."""
     name = os.path.basename(exe or "").lower()
+    if (name.endswith((".bat", ".cmd")) or name == "winws.exe") and zapret_root(exe):
+        return {"mode": "zapret", "root": zapret_root(exe)}
+    if name == "proxifier.exe":
+        return {"mode": "proxifier"}
     if name in TUNNEL_CLIENTS:
         return {"mode": "tunnel", "kind": TUNNEL_CLIENTS[name]}
     folder = os.path.dirname(exe or "")
@@ -197,7 +240,7 @@ def conf_kind(path):
 
 
 def kind_for(path):
-    """Что выбрали -> вид VPN: программа, файл туннеля или конфигурация OpenVPN."""
+    """Что выбрали -> вид VPN: программа (в том числе zapret и Proxifier), файл туннеля или конфигурация OpenVPN."""
     low = path.lower()
     if low.endswith(".conf"):
         return conf_kind(path)
@@ -215,12 +258,19 @@ def resolve(vpn):
         return dict(vpn, kind=d["kind"], target=vpn.get("tunnel", ""), client=vpn.get("target", ""))
     if d["mode"] == "cli":
         return dict(vpn, kind="cli", cli=d["cli"], on=d["on"], off=d["off"], status=d["status"])
+    if d["mode"] == "zapret":  # стратегия — выбранный .bat (по умолчанию тот, что указали)
+        bat = vpn.get("tunnel") or vpn.get("target", "")
+        if not bat.lower().endswith((".bat", ".cmd")):
+            bat = (zapret_strategies(d["root"]) or [("", "")])[0][1]
+        return dict(vpn, kind="zapret", root=d["root"], bat=bat)
+    if d["mode"] == "proxifier":
+        return dict(vpn, kind="proxifier", profile=vpn.get("tunnel", ""))
     return dict(vpn, kind="process")
 
 
 VPN_WORDS = ("vpn", "wireguard", "amnezia", "hiddify", "v2ray", "nekoray", "nekobox", "throne", "happ", "outline",
              "clash", "warp", "windscribe", "mullvad", "proton", "nord", "psiphon", "lantern", "sing-box", "karing",
-             "invizible", "proxy")
+             "invizible", "proxy", "proxifier", "zapret")
 
 
 def find_vpn_apps():
@@ -238,7 +288,34 @@ def find_vpn_apps():
                 target = resolve_lnk(os.path.join(root, f))[0]
                 if target.lower().endswith(".exe") and os.path.isfile(target):
                     found.setdefault(target.lower(), target)
+    proxifier = find_exe(*PROXIFIER_EXE)
+    if proxifier:
+        found.setdefault(proxifier.lower(), proxifier)
+    for bat in find_zapret():
+        found.setdefault(bat.lower(), bat)
     return list(found.values())
+
+
+def find_zapret():
+    """Папки zapret обычно просто распакованы куда-то — смотрим в типичных местах на глубину двух папок."""
+    home = os.path.expanduser("~")
+    places = [home, os.path.join(home, "Desktop"), os.path.join(home, "Downloads"), os.path.join(home, "Documents"),
+              os.path.join(home, "OneDrive", "Desktop"), os.path.join(home, "Рабочий стол")]
+    places += [f"{d}:\\" for d in "CDEF" if os.path.isdir(f"{d}:\\")]
+    out = []
+    for place in places:
+        try:
+            first = [os.path.join(place, n) for n in os.listdir(place)]
+        except OSError:
+            continue
+        for d in first:
+            if "zapret" not in os.path.basename(d).lower() or not os.path.isdir(d):
+                continue
+            for cand in [d] + [os.path.join(d, n) for n in os.listdir(d) if os.path.isdir(os.path.join(d, n))]:
+                strategies = zapret_strategies(cand) if os.path.isfile(os.path.join(cand, "bin", "winws.exe")) else []
+                if strategies and strategies[0][1] not in out:
+                    out.append(strategies[0][1])
+    return out
 
 
 _needs_admin = {}
@@ -310,6 +387,103 @@ def reset_local_proxy():
         pass
 
 
+def start_app(exe, args=(), elevate=False):
+    """Запустить программу свёрнутой. С правами MiniDock — если она их сама просит (или elevate) и они у
+    MiniDock есть; иначе как обычный пользователь (через ShellExecute — так же, как ярлык)."""
+    import win32api
+    folder = os.path.dirname(exe)
+    params = subprocess.list2cmdline(list(args))
+    if is_admin() and (elevate or needs_admin(exe)):
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+        subprocess.Popen([exe] + list(args), cwd=folder, startupinfo=si)
+    elif is_admin() and not args:  # MiniDock от администратора: без прав — через Проводник, как панель задач
+        from minidock.winapi import launch
+        launch(exe, folder)
+    else:
+        win32api.ShellExecute(0, "runas" if elevate else "open", exe, params or None, folder, 7)
+    threading.Thread(target=minimize_windows, args=(exe,), daemon=True).start()
+
+
+def minimize_windows(exe, seconds=10):
+    """Окно VPN-программы, которое всё-таки открылось, — свернуть: она нужна, а не мешать поверх."""
+    done = set()
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pids = {p.pid for p in app_processes(exe)}
+
+        def check(h, _):
+            if h in done or not win32gui.IsWindowVisible(h) or not win32gui.GetWindowText(h):
+                return
+            import win32process
+            if win32process.GetWindowThreadProcessId(h)[1] in pids:
+                done.add(h)
+                win32gui.ShowWindow(h, 6)  # SW_MINIMIZE
+        try:
+            win32gui.EnumWindows(check, None)
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+
+def stop_app(exe):
+    """Закрыть программу вместе с её ядром (xray, sing-box…) и вернуть системный прокси. Текст ошибки или ""."""
+    procs = app_processes(exe)
+    for p in list(procs):
+        try:
+            procs += p.children(recursive=True)
+        except psutil.Error:
+            pass
+    denied = False
+    for p in reversed(procs):
+        try:
+            p.kill()
+        except psutil.AccessDenied:
+            denied = True
+        except psutil.Error:
+            pass
+    _launched.pop(exe, None)
+    time.sleep(0.5)
+    reset_local_proxy()
+    return "нужен режим администратора MiniDock (Настройки → Основные)" if denied else ""
+
+
+def winws_processes():
+    out = []
+    for p in psutil.process_iter(["name"]):
+        if (p.info["name"] or "").lower() == "winws.exe":
+            out.append(p)
+    return out
+
+
+def zapret_service():
+    """Служба zapret (если стратегию поставили в автозапуск через service.bat), иначе None."""
+    for name in ("zapret", "winws1", "zapret-discord-youtube"):
+        try:
+            return psutil.win_service_get(name)
+        except Exception:
+            continue
+    return None
+
+
+def hide_winws_later(seconds=12):
+    """Консольное окно winws.exe, открытое .bat-файлом, — спрятать (zapret работает и без него)."""
+    import win32process
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        pids = {p.pid for p in winws_processes()}
+        if pids:
+            def check(h, _):
+                if win32gui.IsWindowVisible(h) and win32process.GetWindowThreadProcessId(h)[1] in pids:
+                    win32gui.ShowWindow(h, 0)  # SW_HIDE
+            try:
+                win32gui.EnumWindows(check, None)
+            except Exception:
+                pass
+        time.sleep(0.5)
+
+
 _launched = {}  # путь .exe -> когда запускали (чтобы не запускать снова, пока он открывается)
 _cli_state = {}  # у клиентов без команды «состояние» помним сами
 
@@ -324,6 +498,11 @@ def is_connected(vpn):
         code, out = run([vpn["cli"]] + vpn["status"], timeout=10)
         return code == 0 and re.search(r"\bconnected\b", out.lower()) is not None  # «Disconnected» не подходит
     if kind == "process":
+        return bool(target) and bool(app_processes(target))
+    if kind == "zapret":
+        svc = zapret_service()
+        return bool(winws_processes()) or (svc is not None and svc.status() == "running")
+    if kind == "proxifier":
         return bool(target) and bool(app_processes(target))
     if kind == "windows":
         code, out = run(["rasdial"], timeout=10)
@@ -361,12 +540,43 @@ def connect(vpn):
         if app_processes(target) or time.monotonic() - _launched.get(target, -999) < 60:
             return ""  # уже запущена или только что запускали
         _launched[target] = time.monotonic()
-        folder = os.path.dirname(target)
-        if needs_admin(target) and is_admin():  # запустится с правами MiniDock — без лишнего вопроса UAC
-            subprocess.Popen([target], cwd=folder)
-        else:  # как обычный пользователь, даже если MiniDock от администратора
-            from minidock.winapi import launch
-            launch(target, folder)
+        start_app(target)
+        return ""
+    if kind == "zapret":
+        if winws_processes():
+            return ""
+        svc = zapret_service()
+        if svc is not None:  # стратегия стоит службой — её и запускаем
+            code, out = run(["sc", "start", svc.name()])
+            return "" if code == 0 or "1056" in out else (out.splitlines()[0] if out else f"код {code}")
+        bat = vpn.get("bat", "")
+        if not os.path.isfile(bat):
+            return "не найден .bat стратегии zapret — выберите его заново"
+        if time.monotonic() - _launched.get(bat, -999) < 30:
+            return ""
+        _launched[bat] = time.monotonic()
+        if is_admin():  # zapret (драйвер WinDivert) работает только с правами администратора
+            proc = subprocess.Popen(["cmd", "/c", bat], cwd=os.path.dirname(bat), creationflags=NO_WINDOW,
+                                    stdin=subprocess.DEVNULL)
+            # .bat иногда ждёт ответа (проверка обновлений) — не держим его дольше минуты
+            threading.Timer(60, lambda: proc.poll() is None and proc.kill()).start()
+        else:
+            import win32api
+            win32api.ShellExecute(0, "runas", "cmd.exe", f'/c "{bat}"', os.path.dirname(bat), 0)
+        threading.Thread(target=hide_winws_later, daemon=True).start()
+        return ""
+    if kind == "proxifier":
+        if not os.path.isfile(target):
+            return "Proxifier не найден — выберите его заново"
+        profile = vpn.get("profile", "")
+        if app_processes(target):
+            if profile and os.path.isfile(profile):  # уже запущен — просто загрузить нужный профиль
+                start_app(target, [profile, "silent-load"])
+            return ""
+        if time.monotonic() - _launched.get(target, -999) < 30:
+            return ""
+        _launched[target] = time.monotonic()
+        start_app(target, [profile, "silent-load"] if profile and os.path.isfile(profile) else (), elevate=True)
         return ""
     if kind == "windows":
         code, out = run(["rasdial", target])
@@ -410,24 +620,21 @@ def disconnect(vpn):
         if code == 0:
             _cli_state[vpn["cli"]] = False
         return "" if code == 0 else out.splitlines()[0] if out else f"код {code}"
-    if kind == "process":
-        procs = app_processes(target)
-        for p in list(procs):
-            try:
-                procs += p.children(recursive=True)  # ядро (sing-box, xray) — дочерний процесс
-            except psutil.Error:
-                pass
+    if kind in ("process", "proxifier"):
+        return stop_app(target)
+    if kind == "zapret":
+        svc = zapret_service()
+        if svc is not None and svc.status() == "running":
+            run(["sc", "stop", svc.name()])
         denied = False
-        for p in reversed(procs):
+        for p in winws_processes():
             try:
                 p.kill()
             except psutil.AccessDenied:
                 denied = True
             except psutil.Error:
                 pass
-        _launched.pop(target, None)
-        time.sleep(0.5)
-        reset_local_proxy()
+        _launched.pop(vpn.get("bat", ""), None)
         return "нужен режим администратора MiniDock (Настройки → Основные)" if denied else ""
     if kind == "windows":
         code, out = run(["rasdial", target, "/disconnect"])
@@ -1474,7 +1681,11 @@ class VpnCard(Anim):
         if kind == "app" and target:  # у «Программы» — значок самой VPN-программы
             if getattr(self, "_icon_for", None) != target:
                 self._icon_for = target
-                self._icon = extract_icon(target, 0, 64) if os.path.isfile(target) else None
+                mode = detect(target)["mode"] if os.path.isfile(target) else "process"
+                self._mode = {"zapret": "zapret", "proxifier": "Proxifier", "cli": "напрямую",
+                              "tunnel": "туннель"}.get(mode, "Программа")
+                self._icon = (letter_icon("Z", "#e0533d", 64) if mode == "zapret"
+                              else extract_icon(target, 0, 64) if os.path.isfile(target) else None)
             icon = self._icon
         if icon is not None:
             p.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -1490,7 +1701,8 @@ class VpnCard(Anim):
         fm = QFontMetricsF(font(10, True))
         p.drawText(QRectF(58, 10, self.width() - 90, 22), Qt.AlignVCenter,
                    fm.elidedText(self.vpn.get("name") or "Без названия", Qt.ElideRight, self.width() - 92))
-        sub = f"{KIND_NAMES[kind]} · " + (f"{n} {plural(n, 'правило', 'правила', 'правил')}" if n else "нет программ")
+        kind_name = getattr(self, "_mode", None) if kind == "app" and target else KIND_NAMES[kind]
+        sub = f"{kind_name} · " + (f"{n} {plural(n, 'правило', 'правила', 'правил')}" if n else "нет программ")
         p.setPen(DIM)
         p.setFont(font(8))
         p.drawText(QRectF(58, 32, self.width() - 90, 20), Qt.AlignVCenter, sub)
@@ -1624,7 +1836,7 @@ class DropZone(Anim):
         self.setCursor(Qt.PointingHandCursor)
 
     def ext(self):
-        return (".exe", ".lnk", ".conf", ".ovpn")  # что именно выбрали — виджет определит сам
+        return (".exe", ".lnk", ".conf", ".ovpn", ".bat", ".ppx")  # что именно выбрали — виджет определит сам
 
     def set_path(self, path):
         self.path = path
@@ -1665,7 +1877,7 @@ class DropZone(Anim):
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        flt = "Программа VPN или файл туннеля (*.exe *.lnk *.conf *.ovpn)"
+        flt = "Программа VPN, файл туннеля, стратегия zapret или профиль Proxifier (*.exe *.lnk *.conf *.ovpn *.bat *.ppx)"
         start = os.path.dirname(self.path) if os.path.isfile(self.path) else os.environ.get("ProgramFiles", "")
         path, _ = QFileDialog.getOpenFileName(self, "Файл VPN", start, flt)
         if path:
@@ -1696,7 +1908,10 @@ class DropZone(Anim):
         elif self.path:
             ok = os.path.isfile(self.path)
             label, color, _ = KIND_STYLE[self.kind]
-            icon = extract_icon(self.path, 0, 64) if self.kind == "app" and ok else None
+            zr = zapret_root(self.path) if self.kind == "app" and ok else None
+            icon = extract_icon(self.path, 0, 64) if self.kind == "app" and ok and not zr else None
+            if zr:
+                label, color = "Z", "#e0533d"
             if icon is not None:  # у программы — её собственный значок
                 p.setRenderHint(QPainter.SmoothPixmapTransform)
                 p.drawPixmap(QRectF(14, 14, 36, 36).toRect(), icon)
@@ -1704,6 +1919,8 @@ class DropZone(Anim):
                 p.drawPixmap(14, 14, letter_icon(label, color, 36))
             title = (exe_description(self.path) or os.path.basename(self.path)) if self.kind == "app" and ok \
                 else os.path.basename(self.path)
+            if zr:
+                title = f"zapret · {os.path.basename(zr)}"
             p.setPen(TEXT)
             p.setFont(font(10, True))
             p.drawText(QRectF(62, 10, self.width() - 80, 22), Qt.AlignVCenter, title)
@@ -1717,7 +1934,7 @@ class DropZone(Anim):
             p.setPen(QColor(150, 200, 255))
             p.setFont(font(10, True))
             p.drawText(QRectF(0, 10, self.width(), 24), Qt.AlignCenter,
-                       "Перетащите сюда программу VPN или файл .conf / .ovpn")
+                       "Перетащите сюда программу VPN, файл .conf / .ovpn или .bat zapret")
             p.setPen(DIM)
             p.setFont(font(8))
             p.drawText(QRectF(0, 34, self.width(), 20), Qt.AlignCenter, "или нажмите, чтобы выбрать")
@@ -2092,7 +2309,8 @@ class VpnDialog(QDialog):
         self.tunnel_row = QWidget()
         tr = QHBoxLayout(self.tunnel_row)
         tr.setContentsMargins(0, 0, 0, 0)
-        tr.addWidget(QLabel("Туннель"))
+        self.tunnel_label = QLabel("Туннель")
+        tr.addWidget(self.tunnel_label)
         self.tunnel = QComboBox()
         self.tunnel.currentIndexChanged.connect(self.store)
         tr.addWidget(self.tunnel, 1)
@@ -2139,6 +2357,11 @@ class VpnDialog(QDialog):
                 rule = os.path.basename(path)
                 self.icons.learn(rule, path)
                 chip = Chip(rule, self.icons, ghost=True)
+                zr = zapret_root(path)
+                if zr:
+                    chip.text = f"+ zapret ({os.path.basename(zr)})"
+                    chip.setFixedWidth(int(QFontMetricsF(font(9)).horizontalAdvance(chip.text) + 40))
+                    chip.setToolTip(zr)
                 chip.clicked.connect(lambda _r, p=path: self.pick_app(p))
                 self.found_flow.addWidget(chip)
             for name in windows_vpns():
@@ -2175,7 +2398,23 @@ class VpnDialog(QDialog):
         elif kind == "app" and path and os.path.isfile(path):
             name = exe_description(path) or os.path.basename(path)
             d = detect(path)
-            if d["mode"] == "tunnel":
+            want = self.cfg["vpns"][self.cur].get("tunnel", "") if 0 <= self.cur < len(self.cfg["vpns"]) else ""
+            if d["mode"] == "zapret":
+                text = ("✓  zapret: виджет будет запускать выбранную стратегию и закрывать winws.exe, окно консоли "
+                        "спрячет. Это не VPN, а обход блокировок: трафик идёт напрямую. Какую стратегию запускать?")
+                if not is_admin():
+                    text += (" zapret работает только с правами администратора — включите их в MiniDock "
+                             "(Настройки → Основные), иначе каждый запуск спросит UAC.")
+                self.fill_choice("Стратегия", zapret_strategies(d["root"]), want or path)
+            elif d["mode"] == "proxifier":
+                text = ("✓  Proxifier: виджет будет запускать его с выбранным профилем (там ваши прокси — например, "
+                        "Proxyline) и закрывать, когда прокси не нужен. Какой профиль загружать?")
+                self.fill_choice("Профиль", [("текущий профиль Proxifier", "")] + proxifier_profiles(), want)
+            elif detect(path)["mode"] == "process" and os.path.basename(path).lower() == "happ.exe":
+                text = ("Happ не умеет подключаться по команде, поэтому виджет будет запускать его свёрнутым, когда "
+                        "VPN нужен, и закрывать (вместе с ядром xray), когда нет. Чтобы Happ подключался сам, включите "
+                        "в его настройках автоподключение при запуске.")
+            elif d["mode"] == "tunnel":
                 items = tunnels(d["kind"], path)
                 if items is None:
                     text = (f"{name}: виджет будет включать туннели напрямую. Чтобы увидеть их список, включите в "
@@ -2184,15 +2423,7 @@ class VpnDialog(QDialog):
                     text = f"{name}: туннелей пока нет — добавьте туннель в самой программе, и он появится здесь."
                 else:
                     text = f"✓  {name}: виджет будет включать и выключать туннель напрямую, без окон. Какой туннель?"
-                    want = self.cfg["vpns"][self.cur].get("tunnel", "") if 0 <= self.cur < len(self.cfg["vpns"]) else ""
-                    was = self.loading
-                    self.loading = True
-                    self.tunnel.clear()
-                    for label, tpath in items:
-                        self.tunnel.addItem(label, tpath)
-                    self.tunnel.setCurrentIndex(max(0, self.tunnel.findData(want)))
-                    self.loading = was
-                    self.tunnel_row.setVisible(True)
+                    self.fill_choice("Туннель", items, want)
             elif d["mode"] == "cli":
                 text = f"✓  {name}: у программы есть командная строка — виджет будет подключать и отключать VPN напрямую."
             else:
@@ -2203,6 +2434,23 @@ class VpnDialog(QDialog):
                              "запуск спросит UAC.")
         self.how.setText(text)
         self.how.setVisible(bool(text))
+
+    def fill_choice(self, label, items, want):
+        """Список выбора под подписью: туннель / стратегия zapret / профиль Proxifier."""
+        was = self.loading
+        self.loading = True
+        self.tunnel_label.setText(label)
+        self.tunnel.clear()
+        items = list(items)
+        if want and want not in [v for _, v in items]:  # выбранный раньше файл лежит не там, где мы искали
+            items.append((os.path.splitext(os.path.basename(want))[0], want))
+        for name, value in items:
+            self.tunnel.addItem(name, value)
+        self.tunnel.setCurrentIndex(max(0, self.tunnel.findData(want)))
+        self.loading = was
+        self.tunnel_row.setVisible(bool(items))
+        if items and not was:
+            self.store()
 
     def set_kind(self, kind, store=True):
         """Вид VPN — по тому, что выбрали (сам пользователь его больше не выбирает)."""
@@ -2231,6 +2479,13 @@ class VpnDialog(QDialog):
             self.store()
 
     def file_chosen(self, path):
+        if path.lower().endswith(".ppx"):  # профиль Proxifier: управляем Proxifier, загружая этот профиль
+            exe = find_exe(*PROXIFIER_EXE)
+            if 0 <= self.cur < len(self.cfg["vpns"]):
+                self.cfg["vpns"][self.cur]["tunnel"] = path
+            if exe:
+                self.drop.set_path(exe)
+                path = exe
         self.set_kind(kind_for(path), store=False)
         if not self.name.text().strip() or self.name.text().startswith("VPN "):
             nice = exe_description(path) if path.lower().endswith(".exe") else None
@@ -2246,6 +2501,8 @@ class VpnDialog(QDialog):
         v = self.cfg["vpns"][self.cur]
         if kind == "app" and self.tunnel_row.isVisible():
             v["tunnel"] = self.tunnel.currentData() or ""
+        elif kind != "app":
+            v.pop("tunnel", None)
         v.update(name=self.name.text().strip(), kind=kind, target="" if kind == "command" else self.drop.path,
                  on=self.on_cmd.text().strip(), off=self.off_cmd.text().strip(), check=self.check_cmd.text().strip(),
                  apps=self.apps.items())
