@@ -30,7 +30,7 @@ import time
 
 import psutil
 import win32gui
-from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect,
                                QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QPushButton, QScrollArea,
@@ -1181,10 +1181,13 @@ class AppPicker(QDialog):
     picked = Signal(str, object)
 
     def __init__(self, icons, parent):
-        # окно настроек всегда поверх остальных — без этого флага окно выбора открывалось под ним (невидимым)
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+        # Не Qt.Popup: всплывающее окно Qt рядом с окном настроек (оно всегда поверх) закрывалось сразу после
+        # показа. Обычное окно без рамки, поверх всех; закрывается само — клик мимо, другое окно, Esc
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
                          | Qt.WindowStaysOnTopHint)
         self.setObjectName("picker")
+        self.browsing = False
+        self.owner = parent
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.icons = icons
@@ -1263,8 +1266,12 @@ class AppPicker(QDialog):
             self.choose("окно: " + w)
 
     def browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Программа", os.environ.get("ProgramFiles", ""),
-                                              "Программы (*.exe)")
+        self.browsing = True  # окно выбора файла забирает фокус — это не повод закрываться
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "Программа", os.environ.get("ProgramFiles", ""),
+                                                  "Программы (*.exe)")
+        finally:
+            self.browsing = False
         if path:
             self.choose(os.path.basename(path), os.path.normpath(path))
 
@@ -1283,7 +1290,43 @@ class AppPicker(QDialog):
         except Exception:
             pass
         fade_in(self, slide=10)
+        self.raise_()
+        self.activateWindow()
         self.search.setFocus()
+        QApplication.instance().installEventFilter(self)  # клик где угодно мимо этого окна — закрыться
+
+    def eventFilter(self, obj, e):
+        if e.type() == QEvent.MouseButtonPress and not self.browsing and isinstance(obj, QWidget)                 and obj.window() is not self:
+            QTimer.singleShot(0, self.close_if_open)
+        return False
+
+    def close_if_open(self):
+        try:
+            self.close()
+        except RuntimeError:  # уже закрыто
+            pass
+
+    def changeEvent(self, e):
+        super().changeEvent(e)
+        if e.type() == QEvent.ActivationChange and not self.isActiveWindow() and not self.browsing:
+            QTimer.singleShot(0, self.close_if_away)
+
+    def close_if_away(self):
+        try:
+            if not self.isActiveWindow() and not self.browsing:
+                self.close()
+        except RuntimeError:  # уже закрыто
+            pass
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(e)
+
+    def closeEvent(self, e):
+        QApplication.instance().removeEventFilter(self)
+        super().closeEvent(e)
 
     def paintEvent(self, e):
         p = QPainter(self)
