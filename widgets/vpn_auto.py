@@ -355,10 +355,26 @@ class VpnAuto(BarWidget):
         self.hold = None
 
     def configure(self):
-        dlg = VpnDialog(load_cfg())
-        if dlg.exec() == QDialog.Accepted:
-            save_cfg(dlg.result_cfg())
-            self.hold = None
+        """Окно настроек — обычное, не модальное: модальное, будучи свёрнутым (а панели задач у MiniDock нет),
+        не давало кликать по всему остальному MiniDock. Уже открыто — просто развернуть и показать."""
+        dlg = getattr(self, "dlg", None)
+        try:
+            if dlg is not None and dlg.isVisible():
+                dlg.showNormal()
+                dlg.raise_()
+                dlg.activateWindow()
+                return
+        except RuntimeError:  # окно уже закрыли и удалили
+            pass
+        dlg = self.dlg = VpnDialog(load_cfg())
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.accepted.connect(lambda: self.save_from(dlg))
+        dlg.show()
+        dlg.activateWindow()
+
+    def save_from(self, dlg):
+        save_cfg(dlg.result_cfg())
+        self.hold = None
 
     def text(self, d):
         if d["on"]:
