@@ -1,4 +1,4 @@
-"""Виджет MiniDock «VPN по программам»: сам подключает VPN, когда запущена программа, которой он нужен
+"""Виджет MiniDock «VPN Handler» (VPN по программам): сам подключает VPN, когда запущена программа, которой он нужен
 (Discord, вкладка YouTube в браузере…), и отключает, когда она закрыта или запущена программа, которой
 VPN мешает (банк, Госуслуги, маркетплейсы).
 
@@ -179,6 +179,31 @@ def tunnels(kind, exe):
                     if f.lower().endswith(".ovpn"):
                         out.append((f[:-5], os.path.join(root, f)))
     return out
+
+
+def conf_kind(path):
+    """Файл .conf: у AmneziaWG есть свои параметры маскировки (Jc, Jmin, S1, H1…), у WireGuard их нет.
+    Если AmneziaWG установлен, а WireGuard нет — им же (он открывает и обычные туннели WireGuard)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            keys = {line.split("=", 1)[0].strip().lower() for line in f if "=" in line}
+    except OSError:
+        keys = set()
+    if keys & {"jc", "jmin", "jmax", "s1", "s2", "h1", "h2", "h3", "h4"}:
+        return "amneziawg"
+    if not _wg_exe("wireguard") and _wg_exe("amneziawg"):
+        return "amneziawg"
+    return "wireguard"
+
+
+def kind_for(path):
+    """Что выбрали -> вид VPN: программа, файл туннеля или конфигурация OpenVPN."""
+    low = path.lower()
+    if low.endswith(".conf"):
+        return conf_kind(path)
+    if low.endswith(".ovpn"):
+        return "openvpn"
+    return "app"
 
 
 def resolve(vpn):
@@ -471,7 +496,7 @@ def first_match(rules, names, titles):
 
 class VpnAuto(BarWidget):
     id = "vpn_auto"
-    name = "VPN по программам"
+    name = "VPN Handler — VPN по программам"
     icon = "\ue705"  # замок
     interval = 4.0
 
@@ -611,7 +636,7 @@ class VpnAuto(BarWidget):
 
     def panel(self, d):
         cfg = d["cfg"]
-        rows = [("title", "VPN по программам")]
+        rows = [("title", "VPN Handler")]
         if not cfg["vpns"]:
             rows += [("text", "Добавьте свои VPN и программы, которым они нужны, — дальше виджет сам будет "
                               "подключать и отключать VPN."),
@@ -727,6 +752,50 @@ def letter_icon(text, color, size):
     p.setFont(font(max(5, int(size * (0.32 if len(text) <= 3 else 0.24))), True))
     p.drawText(QRectF(0, 0, size, size), Qt.AlignCenter, text)
     p.end()
+    return pix
+
+
+def logo_pixmap(size):
+    """Логотип VPN Handler: щит с молнией на сине-фиолетовом градиенте (рисуется в двойном разрешении)."""
+    k = 2
+    pix = QPixmap(size * k, size * k)
+    pix.fill(Qt.transparent)
+    p = QPainter(pix)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(k, k)
+    s = float(size)
+    g = QLinearGradient(0, 0, s, s)
+    g.setColorAt(0, QColor("#7c5cff"))
+    g.setColorAt(0.55, QColor("#3d7bff"))
+    g.setColorAt(1, QColor("#00d4ff"))
+    p.setPen(Qt.NoPen)
+    p.setBrush(g)
+    p.drawRoundedRect(QRectF(0, 0, s, s), s * 0.27, s * 0.27)
+    glow = QLinearGradient(0, 0, 0, s * 0.55)  # блик сверху
+    glow.setColorAt(0, QColor(255, 255, 255, 70))
+    glow.setColorAt(1, QColor(255, 255, 255, 0))
+    p.setBrush(glow)
+    p.drawRoundedRect(QRectF(0, 0, s, s * 0.6), s * 0.27, s * 0.27)
+    shield = QPainterPath()  # щит
+    cx = s / 2
+    shield.moveTo(cx, s * 0.17)
+    shield.cubicTo(cx + s * 0.13, s * 0.25, cx + s * 0.25, s * 0.26, cx + s * 0.29, s * 0.26)
+    shield.cubicTo(cx + s * 0.29, s * 0.52, cx + s * 0.20, s * 0.71, cx, s * 0.84)
+    shield.cubicTo(cx - s * 0.20, s * 0.71, cx - s * 0.29, s * 0.52, cx - s * 0.29, s * 0.26)
+    shield.cubicTo(cx - s * 0.25, s * 0.26, cx - s * 0.13, s * 0.25, cx, s * 0.17)
+    p.setBrush(QColor(255, 255, 255, 40))
+    p.setPen(QPen(QColor(255, 255, 255), max(1.2, s * 0.055), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(shield)
+    bolt = QPainterPath()  # молния — «переключает сам»
+    pts = [(0.55, 0.30), (0.40, 0.53), (0.50, 0.53), (0.45, 0.71), (0.61, 0.46), (0.51, 0.46), (0.55, 0.30)]
+    bolt.moveTo(s * pts[0][0], s * pts[0][1])
+    for x, y in pts[1:]:
+        bolt.lineTo(s * x, s * y)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(255, 255, 255))
+    p.drawPath(bolt)
+    p.end()
+    pix.setDevicePixelRatio(k)
     return pix
 
 
@@ -1180,7 +1249,7 @@ class AppPicker(QDialog):
     """Окно выбора: открытые сейчас программы плитками, поиск, сайт по слову из заголовка, файл .exe."""
     picked = Signal(str, object)
 
-    def __init__(self, icons, parent):
+    def __init__(self, icons, parent, suggest=()):
         # Не Qt.Popup: всплывающее окно Qt рядом с окном настроек (оно всегда поверх) закрывалось сразу после
         # показа. Обычное окно без рамки, поверх всех; закрывается само — клик мимо, другое окно, Esc
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
@@ -1211,7 +1280,7 @@ class AppPicker(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         rows = max(1, (len(open_programs()) + 3) // 4)
-        scroll.setFixedHeight(min(300, rows * 96 + 4))
+        scroll.setFixedHeight(min(200 if suggest else 300, rows * 96 + 4))
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         lay.addWidget(scroll)
         self.tiles = []
@@ -1221,9 +1290,22 @@ class AppPicker(QDialog):
             tile.clicked.connect(lambda n=name, pa=path: self.choose(n, pa))
             self.tiles.append((name.lower() + " " + tile.title.lower(), tile))
         self.filter("")
+        if suggest:
+            cap = QLabel("Популярное")
+            cap.setObjectName("sub")
+            lay.addWidget(cap)
+            pop = QWidget()
+            pl = FlowLayout(pop, 4)
+            for rule in suggest:
+                tile = AppTile(icons.label(rule), icons.icon(rule, 64))
+                tile.clicked.connect(lambda r=rule: self.choose(r))
+                pl.addWidget(tile)
+                self.tiles.append(("", tile))  # чтобы появлялись по очереди вместе с остальными
+            lay.addWidget(pop)
         for i, (_, tile) in enumerate(self.tiles):  # плитки появляются по очереди
             QTimer.singleShot(18 * i, tile, lambda t=tile: setattr(t, "_a", animate(t, 260, lambda v, t=t: (
                 setattr(t, "appear", v), t.update()))))  # окно закрыли раньше — таймер умрёт вместе с плиткой
+        self.tiles = [(k, t) for k, t in self.tiles if k]  # поиск — только по открытым программам
         sep = QLabel("Сайт в браузере или любое окно")
         sep.setObjectName("sub")
         lay.addWidget(sep)
@@ -1336,31 +1418,14 @@ class AppPicker(QDialog):
         p.drawRoundedRect(QRectF(0.5, 0.5, self.width() - 1, self.height() - 1), 16, 16)
 
 
-class Badge(QWidget):
-    """Значок вида VPN: цветная плашка с короткой подписью."""
-
-    def __init__(self, kind, size=36):
-        super().__init__()
-        self.kind = kind
-        self.setFixedSize(size, size)
-
-    def set_kind(self, kind):
-        self.kind = kind
-        self.update()
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.drawPixmap(0, 0, letter_icon(KIND_STYLE[self.kind][0], KIND_STYLE[self.kind][1], self.width()))
-
-
 class VpnCard(Anim):
     """Карточка VPN в списке слева: номер (приоритет), значок вида, название, сколько программ, статус."""
     chosen = Signal(int)
     moved = Signal(int, int)
 
-    def __init__(self, idx, vpn, special=False):
+    def __init__(self, idx, vpn):
         super().__init__()
-        self.idx, self.vpn, self.special = idx, vpn, special
+        self.idx, self.vpn = idx, vpn
         self.sel = 0.0
         self.selected = False
         self.online = False
@@ -1386,9 +1451,7 @@ class VpnCard(Anim):
         if e.button() != Qt.LeftButton:
             return
         up, down = self.arrows()
-        if self.special:
-            self.chosen.emit(self.idx)
-        elif self.hovered and up.contains(e.position()):
+        if self.hovered and up.contains(e.position()):
             self.moved.emit(self.idx, -1)
         elif self.hovered and down.contains(e.position()):
             self.moved.emit(self.idx, 1)
@@ -1406,16 +1469,6 @@ class VpnCard(Anim):
         p.drawRoundedRect(r, 12, 12)
         kind = self.vpn.get("kind", "windows")
         n = len(self.vpn.get("apps", []))
-        if self.special:  # «Без VPN»: красный значок, без номера и стрелок
-            p.drawPixmap(12, 13, letter_icon("Без", "#ff453a", 36))
-            p.setPen(TEXT)
-            p.setFont(font(10, True))
-            p.drawText(QRectF(58, 10, self.width() - 70, 22), Qt.AlignVCenter, "Без VPN")
-            p.setPen(DIM)
-            p.setFont(font(8))
-            p.drawText(QRectF(58, 32, self.width() - 70, 20), Qt.AlignVCenter,
-                       f"Банки, Госуслуги · {n} {plural(n, 'правило', 'правила', 'правил')}" if n else "Банки, Госуслуги")
-            return
         target = self.vpn.get("target", "")
         icon = None
         if kind == "app" and target:  # у «Программы» — значок самой VPN-программы
@@ -1466,12 +1519,79 @@ def plural(n, one, few, many):
     return many
 
 
+class ExCard(Anim):
+    """Исключение в списке слева: значок программы или сайта, название; при наведении — крестик."""
+    chosen = Signal(int)
+    removed = Signal(int)
+
+    def __init__(self, idx, rule, icons):
+        super().__init__()
+        self.idx, self.rule, self.icons = idx, rule, icons
+        self.sel = 0.0
+        self.selected = False
+        self.setFixedHeight(54)
+        self.setCursor(Qt.PointingHandCursor)
+        icons.ready.connect(self.update)
+
+    set_selected = VpnCard.set_selected
+
+    def x_rect(self):
+        return QRectF(self.width() - 30, (self.height() - 20) / 2, 20, 20)
+
+    def mouseReleaseEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        if self.hovered and self.x_rect().adjusted(-4, -4, 4, 4).contains(e.position()):
+            self.removed.emit(self.idx)
+        else:
+            self.chosen.emit(self.idx)
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        r = QRectF(1, 1, self.width() - 2, self.height() - 2)
+        bg = QColor(255, 69, 58, int(60 * self.sel))  # выбранное исключение — красноватым
+        p.setPen(QPen(QColor(255, 105, 97, int(200 * self.sel)), 1.2) if self.sel > 0.01 else Qt.NoPen)
+        p.setBrush(QColor(255, 255, 255, int(12 * self.t_hover)) if self.sel < 0.01 else bg)
+        p.drawRoundedRect(r, 12, 12)
+        p.drawPixmap(QRectF(12, 11, 32, 32).toRect(), self.icons.icon(self.rule, 64))
+        # маленький красный значок «нет» на углу — это исключение, а не VPN
+        p.setPen(QPen(QColor(34, 34, 40), 2))
+        p.setBrush(QColor(255, 69, 58))
+        badge = QRectF(34, 31, 13, 13)
+        p.drawEllipse(badge)
+        p.setPen(QPen(QColor(255, 255, 255), 1.6))
+        p.drawLine(QPointF(badge.left() + 3.5, badge.center().y()), QPointF(badge.right() - 3.5, badge.center().y()))
+        site = self.rule.strip().lower().startswith("окно:")
+        p.setPen(TEXT)
+        p.setFont(font(10, True))
+        fm = QFontMetricsF(font(10, True))
+        p.drawText(QRectF(56, 7, self.width() - 92, 22), Qt.AlignVCenter,
+                   fm.elidedText(self.icons.label(self.rule), Qt.ElideRight, self.width() - 94))
+        p.setPen(DIM)
+        p.setFont(font(8))
+        p.drawText(QRectF(56, 27, self.width() - 92, 20), Qt.AlignVCenter,
+                   ("Сайт" if site else "Программа") + " · VPN выключается")
+        if self.t_hover > 0.01:  # крестик «убрать»
+            x = self.x_rect()
+            p.setOpacity(self.t_hover)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 30))
+            p.drawEllipse(x)
+            p.setPen(QPen(TEXT, 1.5))
+            c, d = x.center(), 4
+            p.drawLine(QPointF(c.x() - d, c.y() - d), QPointF(c.x() + d, c.y() + d))
+            p.drawLine(QPointF(c.x() - d, c.y() + d), QPointF(c.x() + d, c.y() - d))
+
+
 class NewCard(Anim):
     """«+ Новый VPN» внизу списка — пунктиром."""
     clicked = Signal()
 
-    def __init__(self):
+    def __init__(self, text="+  Новый VPN"):
         super().__init__()
+        self.text = text
         self.setFixedHeight(48)
         self.setCursor(Qt.PointingHandCursor)
 
@@ -1487,57 +1607,7 @@ class NewCard(Anim):
         p.drawRoundedRect(QRectF(1, 1, self.width() - 2, self.height() - 2), 12, 12)
         p.setPen(QColor(255, 255, 255, int(150 + 90 * self.t_hover)))
         p.setFont(font(9, True))
-        p.drawText(self.rect(), Qt.AlignCenter, "+  Новый VPN")
-
-
-class KindTile(Anim):
-    """Плитка выбора вида VPN."""
-    clicked = Signal(str)
-
-    def __init__(self, kind):
-        super().__init__()
-        self.kind = kind
-        self.sel = 0.0
-        self.selected = False
-        self.setFixedSize(102, 80)
-        self.setCursor(Qt.PointingHandCursor)
-
-    def set_selected(self, on):
-        if on == self.selected:
-            return
-        self.selected = on
-        start = self.sel
-
-        def step(v):
-            self.sel = start + ((1.0 if on else 0.0) - start) * v
-            self.update()
-        self._sel = animate(self, 220, step, curve=QEasingCurve.OutBack if on else QEasingCurve.OutCubic)
-
-    def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self.clicked.emit(self.kind)
-
-    def paintEvent(self, e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        label, color, sub = KIND_STYLE[self.kind]
-        c = QColor(color)
-        r = QRectF(1.5, 1.5, self.width() - 3, self.height() - 3)
-        fill = QColor(c)
-        fill.setAlpha(int(10 * self.t_hover + 55 * min(1.0, self.sel)))
-        p.setBrush(fill if self.sel > 0.01 or self.t_hover > 0.01 else QColor(255, 255, 255, 10))
-        ring = QColor(c.lighter(130))
-        ring.setAlpha(int(255 * min(1.0, self.sel)))
-        p.setPen(QPen(ring, 2) if self.sel > 0.01 else QPen(QColor(255, 255, 255, 22), 1))
-        p.drawRoundedRect(r, 14, 14)
-        s = 30 + 4 * self.sel  # значок выбранного чуть подрастает
-        p.drawPixmap(QRectF((self.width() - s) / 2, 10 - 2 * self.sel, s, s).toRect(), letter_icon(label, color, 72))
-        p.setPen(TEXT)
-        p.setFont(font(8, True))
-        p.drawText(QRectF(0, 44, self.width(), 18), Qt.AlignCenter, KIND_NAMES[self.kind])
-        p.setPen(DIM)
-        p.setFont(font(7))
-        p.drawText(QRectF(4, 60, self.width() - 8, 16), Qt.AlignCenter, sub)
+        p.drawText(self.rect(), Qt.AlignCenter, self.text)
 
 
 class DropZone(Anim):
@@ -1554,7 +1624,7 @@ class DropZone(Anim):
         self.setCursor(Qt.PointingHandCursor)
 
     def ext(self):
-        return {"openvpn": (".ovpn",), "app": (".exe", ".lnk")}.get(self.kind, (".conf",))
+        return (".exe", ".lnk", ".conf", ".ovpn")  # что именно выбрали — виджет определит сам
 
     def set_path(self, path):
         self.path = path
@@ -1595,9 +1665,8 @@ class DropZone(Anim):
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        flt = {"openvpn": "Конфигурация OpenVPN (*.ovpn)", "app": "Программа VPN (*.exe *.lnk)"}.get(
-            self.kind, "Туннель (*.conf)")
-        start = os.path.dirname(self.path) or (os.environ.get("ProgramFiles", "") if self.kind == "app" else "")
+        flt = "Программа VPN или файл туннеля (*.exe *.lnk *.conf *.ovpn)"
+        start = os.path.dirname(self.path) if os.path.isfile(self.path) else os.environ.get("ProgramFiles", "")
         path, _ = QFileDialog.getOpenFileName(self, "Файл VPN", start, flt)
         if path:
             self.set_path(self.real(os.path.normpath(path)))
@@ -1615,7 +1684,16 @@ class DropZone(Anim):
             p.setPen(QPen(QColor(10, 132, 255, int(110 + 145 * k)), 1.5, Qt.DashLine))
             p.setBrush(QColor(10, 132, 255, int(18 + 50 * self.drag)))
         p.drawRoundedRect(r, 12, 12)
-        if self.path:
+        if self.path and self.kind == "windows":  # подключение Windows — это имя, а не файл
+            p.drawPixmap(14, 14, letter_icon("Win", KIND_STYLE["windows"][1], 36))
+            p.setPen(TEXT)
+            p.setFont(font(10, True))
+            p.drawText(QRectF(62, 10, self.width() - 80, 22), Qt.AlignVCenter, self.path)
+            p.setPen(DIM)
+            p.setFont(font(8))
+            p.drawText(QRectF(62, 32, self.width() - 80, 20), Qt.AlignVCenter,
+                       "VPN-подключение Windows  ·  нажмите, чтобы заменить")
+        elif self.path:
             ok = os.path.isfile(self.path)
             label, color, _ = KIND_STYLE[self.kind]
             icon = extract_icon(self.path, 0, 64) if self.kind == "app" and ok else None
@@ -1638,8 +1716,8 @@ class DropZone(Anim):
         else:
             p.setPen(QColor(150, 200, 255))
             p.setFont(font(10, True))
-            what = "программу VPN (.exe или ярлык)" if self.kind == "app" else "файл " + self.ext()[0]
-            p.drawText(QRectF(0, 10, self.width(), 24), Qt.AlignCenter, f"Перетащите сюда {what}")
+            p.drawText(QRectF(0, 10, self.width(), 24), Qt.AlignCenter,
+                       "Перетащите сюда программу VPN или файл .conf / .ovpn")
             p.setPen(DIM)
             p.setFont(font(8))
             p.drawText(QRectF(0, 34, self.width(), 20), Qt.AlignCenter, "или нажмите, чтобы выбрать")
@@ -1748,6 +1826,8 @@ QLabel#h { font: bold 13pt 'Segoe UI'; }
 QLabel#sub { font: bold 9pt 'Segoe UI'; color: rgba(255, 255, 255, 200); margin-top: 4px; }
 QLabel#dim { color: rgba(255, 255, 255, 135); font: 8pt 'Segoe UI'; }
 QLabel#warn { color: #ffb340; font: 8pt 'Segoe UI'; }
+QLabel#exinfo { color: #ffb3ad; font: 9pt 'Segoe UI'; background: rgba(255, 69, 58, 26); border-radius: 8px;
+    padding: 10px 12px; }
 QLabel#how { color: #7fe0a0; font: 8pt 'Segoe UI'; background: rgba(48, 209, 88, 22); border-radius: 8px;
     padding: 8px 10px; }
 QLineEdit, QComboBox, QSpinBox { background: rgba(255, 255, 255, 16); border: 1px solid rgba(255, 255, 255, 18);
@@ -1795,67 +1875,85 @@ def section(text, hint=None):
 
 class VpnDialog(QDialog):
     status = Signal(dict)
+    SIDE = 262
 
     def __init__(self, cfg):
         # как окно настроек MiniDock: без рамки Windows, скруглённое, полупрозрачное с размытием под ним
         super().__init__(None, Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowTitle("VPN по программам")
+        self.setWindowTitle("VPN Handler")
         self.setStyleSheet(QSS)
         self.setFixedSize(980, 700)
         self.cfg = json.loads(json.dumps(cfg))
         self.icons = Icons(self.cfg.get("icons", {}))
-        self.cur = -1
+        self.cur = -1        # выбранный VPN
+        self.ex_cur = -1     # выбранное исключение
+        self.kind_now = "app"
         self.loading = False
         self.drag = None
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # слева — боковая колонка: «светофор», карточки VPN, исключения
+        # слева — «светофор», логотип, карточки VPN и исключений
         side = QWidget()
         side.setFixedWidth(self.SIDE)
-        ll = QVBoxLayout(side)
-        ll.setContentsMargins(12, 14, 12, 14)
-        ll.setSpacing(6)
+        sl = QVBoxLayout(side)
+        sl.setContentsMargins(12, 14, 6, 14)
+        sl.setSpacing(6)
         lights = QHBoxLayout()
         lights.setSpacing(8)
         lights.addWidget(TrafficLight("#ff5f57", self.reject))
         lights.addWidget(TrafficLight("#febc2e", self.showMinimized))
         lights.addWidget(TrafficLight("#3a3a40", lambda: None))
         lights.addStretch()
-        ll.addLayout(lights)
-        ll.addSpacing(14)
+        sl.addLayout(lights)
+        sl.addSpacing(12)
         brand = QHBoxLayout()
+        brand.setSpacing(10)
         logo = QLabel()
-        logo.setPixmap(letter_icon("VPN", "#0a84ff", 34))
+        logo.setPixmap(logo_pixmap(36))
         brand.addWidget(logo)
-        bt = QLabel("VPN по программам")
-        bt.setStyleSheet("font: 11pt 'Segoe UI Semibold';")
+        bt = QLabel("VPN Handler")
+        bt.setStyleSheet("font: 13pt 'Segoe UI Semibold';")
         brand.addWidget(bt, 1)
-        ll.addLayout(brand)
-        ll.addSpacing(12)
+        sl.addLayout(brand)
+        sl.addSpacing(10)
+        host = QWidget()
+        ll = QVBoxLayout(host)
+        ll.setContentsMargins(0, 0, 6, 0)
+        ll.setSpacing(6)
         cap = QLabel("ВАШИ VPN")
         cap.setObjectName("dim")
         ll.addWidget(cap)
         self.cards_box = QVBoxLayout()
         self.cards_box.setSpacing(4)
         ll.addLayout(self.cards_box)
-        self.new_card = NewCard()
+        self.new_card = NewCard("+  Новый VPN")
         self.new_card.clicked.connect(self.add_vpn)
         ll.addWidget(self.new_card)
         ll.addSpacing(14)
-        cap2 = QLabel("ИСКЛЮЧЕНИЯ")
+        cap2 = QLabel("ИСКЛЮЧЕНИЯ — С НИМИ VPN ВЫКЛЮЧЕН")
         cap2.setObjectName("dim")
         ll.addWidget(cap2)
-        self.no_card = VpnCard(-2, {"apps": cfg["no_vpn"]}, special=True)
-        self.no_card.chosen.connect(self.select)
-        ll.addWidget(self.no_card)
+        self.ex_box = QVBoxLayout()
+        self.ex_box.setSpacing(4)
+        ll.addLayout(self.ex_box)
+        self.new_ex = NewCard("+  Новое исключение")
+        self.new_ex.clicked.connect(self.add_ex)
+        ll.addWidget(self.new_ex)
         ll.addStretch(1)
-        prio = QLabel("Чем выше в списке, тем главнее: если открыты программы для разных VPN, включится верхний.")
+        side_scroll = SmoothScrollArea()
+        side_scroll.viewport().setAutoFillBackground(False)
+        side_scroll.setWidget(host)
+        side_scroll.setWidgetResizable(True)
+        side_scroll.setFrameShape(QFrame.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        sl.addWidget(side_scroll, 1)
+        prio = QLabel("Чем выше VPN в списке, тем главнее: если открыты программы для разных VPN, включится верхний.")
         prio.setObjectName("dim")
         prio.setWordWrap(True)
-        ll.addWidget(prio)
+        sl.addWidget(prio)
         outer.addWidget(side)
 
         main = QWidget()
@@ -1870,11 +1968,9 @@ class VpnDialog(QDialog):
         self.auto = Switch(bool(cfg["auto"]))
         top.addWidget(self.auto)
         root.addLayout(top)
-        body = QHBoxLayout()
-        body.setSpacing(0)
         outer.addWidget(main, 1)
 
-        # справа — редактор выбранного VPN (или приглашение добавить первый)
+        # справа: приглашение добавить первый VPN / редактор VPN / исключение
         self.stack = QStackedWidget()
         self.empty = EmptyState()
         self.empty.add.connect(self.add_vpn)
@@ -1887,27 +1983,8 @@ class VpnDialog(QDialog):
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.stack.addWidget(scroll)
-        nv = QWidget()
-        nl = QVBoxLayout(nv)
-        nl.setContentsMargins(4, 0, 8, 0)
-        nl.setSpacing(10)
-        title = QLabel("Без VPN")
-        title.setStyleSheet("font: bold 15pt 'Segoe UI';")
-        nl.addWidget(title)
-        hint = QLabel("Пока открыто что-то из этого списка, VPN выключен: банки, Госуслуги и маркетплейсы часто "
-                      "не пускают с ним. Закроете — VPN, который был включён, вернётся сам.")
-        hint.setObjectName("dim")
-        hint.setWordWrap(True)
-        nl.addWidget(hint)
-        nl.addSpacing(6)
-        self.no_vpn = ChipBox(self.icons, SUGGEST_NO_VPN, "")
-        self.no_vpn.set_items(cfg["no_vpn"])
-        self.no_vpn.changed.connect(self.no_changed)
-        nl.addWidget(self.no_vpn)
-        nl.addStretch(1)
-        self.stack.addWidget(nv)
-        body.addWidget(self.stack, 1)
-        root.addLayout(body, 1)
+        self.stack.addWidget(self.build_ex_page())
+        root.addWidget(self.stack, 1)
 
         # подвал
         foot = QHBoxLayout()
@@ -1931,13 +2008,13 @@ class VpnDialog(QDialog):
         root.addLayout(foot)
 
         self.cards = []
+        self.ex_cards = []
         self.online = {}
         self.status.connect(self.on_status)
         self.rebuild_cards()
+        self.rebuild_ex()
         self.select(0 if self.cfg["vpns"] else -1)
         threading.Thread(target=self.check_status, daemon=True).start()
-
-    SIDE = 262
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -1972,7 +2049,7 @@ class VpnDialog(QDialog):
     def mouseReleaseEvent(self, e):
         self.drag = None
 
-    # -- правая часть
+    # -- редактор VPN
     def build_editor(self):
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -1991,24 +2068,11 @@ class VpnDialog(QDialog):
         head.addWidget(trash)
         lay.addLayout(head)
 
-        lay.addWidget(section("Какой у вас VPN"))
-        kinds = QHBoxLayout()
-        kinds.setSpacing(8)
-        self.kind_tiles = {}
-        for k, _ in KINDS:
-            t = KindTile(k)
-            t.clicked.connect(self.set_kind)
-            self.kind_tiles[k] = t
-            kinds.addWidget(t)
-        kinds.addStretch(1)
-        lay.addLayout(kinds)
-
-        self.target_title = section("")
-        lay.addWidget(self.target_title)
+        lay.addWidget(section("VPN", "Программа VPN, файл туннеля (.conf, .ovpn) или подключение Windows — "
+                                     "как им управлять, виджет разберётся сам."))
         self.drop = DropZone()
         self.drop.changed.connect(self.file_chosen)
         lay.addWidget(self.drop)
-        # «Программа»: найденные на компьютере VPN — одним нажатием
         self.found_row = QWidget()
         fl = QVBoxLayout(self.found_row)
         fl.setContentsMargins(0, 0, 0, 0)
@@ -2021,8 +2085,7 @@ class VpnDialog(QDialog):
         fl.addWidget(self.found_box)
         lay.addWidget(self.found_row)
         self.found = None
-        # как виджет будет управлять выбранной программой
-        self.how = QLabel()
+        self.how = QLabel()  # как виджет будет управлять выбранным
         self.how.setObjectName("how")
         self.how.setWordWrap(True)
         lay.addWidget(self.how)
@@ -2034,26 +2097,11 @@ class VpnDialog(QDialog):
         self.tunnel.currentIndexChanged.connect(self.store)
         tr.addWidget(self.tunnel, 1)
         lay.addWidget(self.tunnel_row)
-        self.win_row = QWidget()
-        wr = QHBoxLayout(self.win_row)
-        wr.setContentsMargins(0, 0, 0, 0)
-        self.win_name = QComboBox()
-        self.win_name.setEditable(True)
-        self.win_name.lineEdit().setPlaceholderText("имя подключения")
-        self.win_name.currentTextChanged.connect(self.store)
-        wr.addWidget(self.win_name, 1)
-        ms = QPushButton("Параметры VPN Windows…")
-        ms.clicked.connect(lambda: os.startfile("ms-settings:network-vpn"))
-        wr.addWidget(ms)
-        lay.addWidget(self.win_row)
-        self.cmd_box = QWidget()
+        self.cmd_box = QWidget()  # «свои команды» из прежних версий — показываем, только если такой VPN уже есть
         cl = QGridLayout(self.cmd_box)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setVerticalSpacing(6)
         self.on_cmd, self.off_cmd, self.check_cmd = QLineEdit(), QLineEdit(), QLineEdit()
-        self.on_cmd.setPlaceholderText("команда, которая подключает VPN")
-        self.off_cmd.setPlaceholderText("команда, которая отключает")
-        self.check_cmd.setPlaceholderText("необязательно: код выхода 0 — подключён")
         for i, (lab, e) in enumerate((("Подключить", self.on_cmd), ("Отключить", self.off_cmd),
                                       ("Проверить", self.check_cmd))):
             cl.addWidget(QLabel(lab), i, 0)
@@ -2081,10 +2129,10 @@ class VpnDialog(QDialog):
         return w
 
     def kind(self):
-        return next((k for k, t in self.kind_tiles.items() if t.selected), "windows")
+        return self.kind_now
 
     def show_found(self):
-        """Кнопки найденных VPN-программ (ищем один раз за открытие окна)."""
+        """Найденные VPN-программы и подключения Windows — кнопками (ищем один раз за открытие окна)."""
         if self.found is None:
             self.found = find_vpn_apps()
             for path in self.found:
@@ -2093,80 +2141,79 @@ class VpnDialog(QDialog):
                 chip = Chip(rule, self.icons, ghost=True)
                 chip.clicked.connect(lambda _r, p=path: self.pick_app(p))
                 self.found_flow.addWidget(chip)
+            for name in windows_vpns():
+                chip = Chip(name, self.icons, ghost=True)
+                chip.text = f"+ {name} (Windows)"
+                chip.setFixedWidth(int(QFontMetricsF(font(9)).horizontalAdvance(chip.text) + 40))
+                chip.setToolTip("VPN-подключение Windows")
+                chip.clicked.connect(lambda _r, n=name: self.pick_windows(n))
+                self.found_flow.addWidget(chip)
+                self.found.append(name)
         self.found_row.setVisible(bool(self.found))
 
     def pick_app(self, path):
         self.drop.set_path(path)
         self.file_chosen(path)
 
+    def pick_windows(self, name):
+        self.set_kind("windows", store=False)
+        self.drop.set_path(name)
+        if not self.name.text().strip() or self.name.text().startswith("VPN "):
+            self.name.setText(name)
+        self.update_how()
+        self.store()
+
     def update_how(self):
-        """Подпись «как виджет будет управлять» и выбор туннеля — для вида «Программа»."""
-        path = self.drop.path
+        """Зелёная подпись «как виджет будет управлять» и выбор туннеля."""
+        path, kind = self.drop.path, self.kind()
         self.tunnel_row.setVisible(False)
-        if self.kind() != "app" or not path or not os.path.isfile(path):
-            self.how.setVisible(False)
-            return
-        name = exe_description(path) or os.path.basename(path)
-        d = detect(path)
-        if d["mode"] == "tunnel":
-            kind = d["kind"]
-            items = tunnels(kind, path)
-            if items is None:
-                text = (f"{name}: виджет будет включать туннели напрямую. Чтобы увидеть их список, включите в MiniDock "
-                        "«Работать с правами администратора» (Настройки → Основные).")
-            elif not items:
-                text = f"{name}: туннелей пока нет — добавьте туннель в самой программе, и он появится здесь."
+        text = ""
+        if kind == "windows" and path:
+            text = f"✓  Подключение Windows «{path}»: виджет будет подключать и отключать его сам."
+        elif kind in ("wireguard", "amneziawg", "openvpn") and path and os.path.isfile(path):
+            text = f"✓  Файл {KIND_NAMES[kind]}: виджет будет включать и выключать этот туннель напрямую, без окон."
+        elif kind == "app" and path and os.path.isfile(path):
+            name = exe_description(path) or os.path.basename(path)
+            d = detect(path)
+            if d["mode"] == "tunnel":
+                items = tunnels(d["kind"], path)
+                if items is None:
+                    text = (f"{name}: виджет будет включать туннели напрямую. Чтобы увидеть их список, включите в "
+                            "MiniDock «Работать с правами администратора» (Настройки → Основные).")
+                elif not items:
+                    text = f"{name}: туннелей пока нет — добавьте туннель в самой программе, и он появится здесь."
+                else:
+                    text = f"✓  {name}: виджет будет включать и выключать туннель напрямую, без окон. Какой туннель?"
+                    want = self.cfg["vpns"][self.cur].get("tunnel", "") if 0 <= self.cur < len(self.cfg["vpns"]) else ""
+                    was = self.loading
+                    self.loading = True
+                    self.tunnel.clear()
+                    for label, tpath in items:
+                        self.tunnel.addItem(label, tpath)
+                    self.tunnel.setCurrentIndex(max(0, self.tunnel.findData(want)))
+                    self.loading = was
+                    self.tunnel_row.setVisible(True)
+            elif d["mode"] == "cli":
+                text = f"✓  {name}: у программы есть командная строка — виджет будет подключать и отключать VPN напрямую."
             else:
-                text = f"✓  {name}: виджет будет включать и выключать туннель напрямую, без окон. Какой туннель?"
-                want = self.cfg["vpns"][self.cur].get("tunnel", "") if 0 <= self.cur < len(self.cfg["vpns"]) else ""
-                was = self.loading
-                self.loading = True
-                self.tunnel.clear()
-                for label, tpath in items:
-                    self.tunnel.addItem(label, tpath)
-                i = self.tunnel.findData(want)
-                self.tunnel.setCurrentIndex(max(0, i))
-                self.loading = was
-                self.tunnel_row.setVisible(True)
-        elif d["mode"] == "cli":
-            text = f"✓  {name}: у программы есть командная строка — виджет будет подключать и отключать VPN напрямую."
-        else:
-            text = (f"{name}: командной строки у неё нет, поэтому виджет будет запускать программу, когда VPN нужен, "
-                    "и закрывать, когда нет. Включите в её настройках «подключаться при запуске».")
-            if needs_admin(path) and not is_admin():
-                text += " Программа просит права администратора — включите их и для MiniDock, иначе каждый запуск спросит UAC."
+                text = (f"{name}: командной строки у неё нет, поэтому виджет будет запускать программу, когда VPN "
+                        "нужен, и закрывать, когда нет. Включите в её настройках «подключаться при запуске».")
+                if needs_admin(path) and not is_admin():
+                    text += (" Программа просит права администратора — включите их и для MiniDock, иначе каждый "
+                             "запуск спросит UAC.")
         self.how.setText(text)
-        self.how.setVisible(True)
+        self.how.setVisible(bool(text))
 
     def set_kind(self, kind, store=True):
-        for k, t in self.kind_tiles.items():
-            t.set_selected(k == kind)
-        file_kind = kind in ("wireguard", "amneziawg", "openvpn", "app")
+        """Вид VPN — по тому, что выбрали (сам пользователь его больше не выбирает)."""
+        self.kind_now = kind
         self.drop.kind = kind
-        self.drop.setVisible(file_kind)
-        self.found_row.setVisible(False)
-        if kind == "app":
-            self.show_found()
-        self.win_row.setVisible(kind == "windows")
+        self.drop.setVisible(kind != "command")
         self.cmd_box.setVisible(kind == "command")
-        titles = {"app": ("Программа VPN", "Укажите .exe своего VPN — виджет сам разберётся, как им управлять."),
-                  "windows": ("Подключение Windows", "Выберите VPN, который уже добавлен в «Параметры → Сеть → VPN»."),
-                  "wireguard": ("Файл туннеля", "Файл .conf, который выдал ваш VPN-сервис."),
-                  "amneziawg": ("Файл туннеля", "В Amnezia VPN: «Поделиться» → формат AmneziaWG — получится файл .conf."),
-                  "openvpn": ("Файл конфигурации", "Файл .ovpn от вашего VPN-сервиса."),
-                  "command": ("Команды", "Для любого другого клиента — если он умеет подключаться из командной строки.")}
-        t, h = titles[kind]
-        labels = self.target_title.findChildren(QLabel)
-        labels[0].setText(t)
-        if len(labels) > 1:
-            labels[1].setText(h)
-        else:
-            lab = QLabel(h)
-            lab.setObjectName("dim")
-            lab.setWordWrap(True)
-            self.target_title.layout().addWidget(lab)
+        self.show_found()
+        self.found_row.setVisible(bool(self.found) and kind != "command")
         warn, client = [], ""
-        if file_kind and kind != "app":
+        if kind in ("wireguard", "amneziawg", "openvpn"):
             exe = (_wg_exe(kind) if kind != "openvpn"
                    else find_exe(r"%ProgramFiles%\OpenVPN\bin\openvpn-gui.exe", "openvpn-gui.exe"))
             if not exe:
@@ -2175,8 +2222,6 @@ class VpnDialog(QDialog):
             if kind != "openvpn" and not is_admin():
                 warn.append("Чтобы виджет мог его включать, включите в MiniDock: Настройки → Основные → "
                             "«Работать с правами администратора».")
-        if kind == "windows" and not windows_vpns():
-            warn.append("В Windows пока нет ни одного VPN-подключения — добавьте его в параметрах.")
         self.warn.setText(chr(10).join(warn))
         self.warn.setVisible(bool(warn))
         self.get_client.setText(client)
@@ -2186,6 +2231,7 @@ class VpnDialog(QDialog):
             self.store()
 
     def file_chosen(self, path):
+        self.set_kind(kind_for(path), store=False)
         if not self.name.text().strip() or self.name.text().startswith("VPN "):
             nice = exe_description(path) if path.lower().endswith(".exe") else None
             self.name.setText(nice or os.path.splitext(os.path.basename(path))[0])
@@ -2198,45 +2244,35 @@ class VpnDialog(QDialog):
             return
         kind = self.kind()
         v = self.cfg["vpns"][self.cur]
-        target = (self.win_name.currentText().strip() if kind == "windows"
-                  else self.drop.path if kind in ("wireguard", "amneziawg", "openvpn", "app") else "")
         if kind == "app" and self.tunnel_row.isVisible():
             v["tunnel"] = self.tunnel.currentData() or ""
-        v.update(name=self.name.text().strip(), kind=kind, target=target, on=self.on_cmd.text().strip(),
-                 off=self.off_cmd.text().strip(), check=self.check_cmd.text().strip(), apps=self.apps.items())
+        v.update(name=self.name.text().strip(), kind=kind, target="" if kind == "command" else self.drop.path,
+                 on=self.on_cmd.text().strip(), off=self.off_cmd.text().strip(), check=self.check_cmd.text().strip(),
+                 apps=self.apps.items())
         if self.cur < len(self.cards):
             self.cards[self.cur].vpn = v
             self.cards[self.cur].update()
 
-    def no_changed(self):
-        self.no_card.vpn = {"apps": self.no_vpn.items()}
-        self.no_card.update()
-
     def select(self, row):
         self.cur = row
+        self.ex_cur = -1
         has = 0 <= row < len(self.cfg["vpns"])
-        self.stack.setCurrentIndex(1 if has else 2 if row == -2 else 0)
+        self.stack.setCurrentIndex(1 if has else 0)
         for i, c in enumerate(self.cards):
             c.set_selected(i == row)
-        self.no_card.set_selected(row == -2)
+        for c in self.ex_cards:
+            c.set_selected(False)
         if not has:
             return
         v = self.cfg["vpns"][row]
         self.loading = True
         self.name.setText(v.get("name", ""))
-        kind = v.get("kind", "windows")
-        self.win_name.clear()
-        self.win_name.addItems(windows_vpns())
-        self.win_name.setCurrentText(v.get("target", "") if kind == "windows" else "")
-        self.drop.set_path(v.get("target", "") if kind in ("wireguard", "amneziawg", "openvpn", "app") else "")
-        self.on_cmd.setText(v.get("on", ""))
-        self.off_cmd.setText(v.get("off", ""))
-        self.check_cmd.setText(v.get("check", ""))
+        kind = v.get("kind", "app")
+        self.drop.set_path("" if kind == "command" else v.get("target", ""))
+        self.on_cmd.setText(v.get("on", "") if kind == "command" else "")
+        self.off_cmd.setText(v.get("off", "") if kind == "command" else "")
+        self.check_cmd.setText(v.get("check", "") if kind == "command" else "")
         self.apps.set_items(v.get("apps", []))
-        for t in self.kind_tiles.values():  # без анимации: сразу нужная плитка
-            t.selected = t.kind == kind
-            t.sel = 1.0 if t.selected else 0.0
-            t.update()
         self.set_kind(kind, store=False)
         self.loading = False
         self._fx = animate(self, 220, lambda x: self.fx.setOpacity(0.25 + 0.75 * x))  # плавная смена VPN
@@ -2291,6 +2327,134 @@ class VpnDialog(QDialog):
         self.rebuild_cards()
         self.select(new)
 
+    # -- исключения: каждое — своя карточка
+    def build_ex_page(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 0, 8, 0)
+        lay.setSpacing(12)
+        head = QHBoxLayout()
+        head.setSpacing(14)
+        self.ex_icon = QLabel()
+        head.addWidget(self.ex_icon)
+        tl = QVBoxLayout()
+        tl.setSpacing(0)
+        self.ex_title = QLabel()
+        self.ex_title.setStyleSheet("font: bold 15pt 'Segoe UI';")
+        tl.addWidget(self.ex_title)
+        self.ex_sub = QLabel()
+        self.ex_sub.setObjectName("dim")
+        tl.addWidget(self.ex_sub)
+        head.addLayout(tl, 1)
+        trash = QPushButton("")
+        trash.setObjectName("trash")
+        trash.setToolTip("Убрать это исключение")
+        trash.clicked.connect(lambda: self.remove_ex(self.ex_cur))
+        head.addWidget(trash)
+        lay.addLayout(head)
+        self.ex_info = QLabel()
+        self.ex_info.setObjectName("exinfo")
+        self.ex_info.setWordWrap(True)
+        lay.addWidget(self.ex_info)
+        self.ex_more = section("Ещё исключения", "Банки, Госуслуги и маркетплейсы часто не пускают с VPN — "
+                                                 "добавьте их одним нажатием.")
+        lay.addWidget(self.ex_more)
+        self.ex_suggest = QWidget()
+        self.ex_suggest_flow = FlowLayout(self.ex_suggest, 6)
+        lay.addWidget(self.ex_suggest)
+        lay.addStretch(1)
+        return w
+
+    def rebuild_ex(self):
+        for c in self.ex_cards:
+            c.hide()
+            c.deleteLater()
+        self.ex_cards = []
+        for i, rule in enumerate(self.cfg["no_vpn"]):
+            c = ExCard(i, rule, self.icons)
+            c.chosen.connect(self.select_ex)
+            c.removed.connect(self.remove_ex)
+            self.ex_box.addWidget(c)
+            self.ex_cards.append(c)
+            if i == self.ex_cur:
+                c.selected, c.sel = True, 1.0
+
+    def ex_suggestions(self):
+        have = {r.lower() for r in self.cfg["no_vpn"]}
+        return [r for r in SUGGEST_NO_VPN if r.lower() not in have]
+
+    def select_ex(self, i):
+        if not 0 <= i < len(self.cfg["no_vpn"]):
+            return
+        self.store()
+        self.cur, self.ex_cur = -1, i
+        for c in self.cards:
+            c.set_selected(False)
+        for j, c in enumerate(self.ex_cards):
+            c.set_selected(j == i)
+        rule = self.cfg["no_vpn"][i]
+        site = rule.strip().lower().startswith("окно:")
+        label = self.icons.label(rule)
+        self.ex_icon.setPixmap(self.icons.icon(rule, 56))
+        self.ex_title.setText(label)
+        self.ex_sub.setText(f"Сайт или окно: в заголовке есть «{rule.split(':', 1)[1].strip()}»" if site
+                            else f"Программа {exe_rule(rule)}")
+        self.ex_info.setText(f"Пока {'открыт' if site else 'запущен'} «{label}», VPN выключен — даже если его "
+                             "просит другая программа. Закроете — VPN, который был включён, вернётся сам.")
+        self.clear_flow(self.ex_suggest_flow)
+        hints = self.ex_suggestions()
+        for r in hints:
+            g = Chip(r, self.icons, ghost=True)
+            g.clicked.connect(lambda r: self.ex_picked(r, None))
+            self.ex_suggest_flow.addWidget(g)
+        self.ex_more.setVisible(bool(hints))
+        self.ex_suggest.setVisible(bool(hints))
+        self.stack.setCurrentIndex(2)
+
+    @staticmethod
+    def clear_flow(flow):
+        while flow.count():
+            w = flow.takeAt(0).widget()
+            if w is not None:
+                w.hide()
+                w.deleteLater()
+
+    def add_ex(self):
+        picker = AppPicker(self.icons, self, self.ex_suggestions())
+        picker.picked.connect(self.ex_picked)
+        picker.popup_at(self.new_ex.mapToGlobal(QPoint(self.new_ex.width() + 10, 0)))
+
+    def ex_picked(self, rule, path):
+        self.icons.learn(rule, path)
+        if rule.lower() in (r.lower() for r in self.cfg["no_vpn"]):
+            return
+        self.cfg["no_vpn"].append(rule)
+        self.ex_cur = -1
+        self.rebuild_ex()
+        card = self.ex_cards[-1]
+        card._in = animate(card, 260, lambda v: (card.setFixedHeight(int(54 * v)), card.update()),
+                           curve=QEasingCurve.OutCubic)
+        self.select_ex(len(self.cfg["no_vpn"]) - 1)
+
+    def remove_ex(self, i):
+        if not 0 <= i < len(self.ex_cards):
+            return
+        card = self.ex_cards[i]
+        was_open = self.ex_cur == i
+
+        def done():
+            del self.cfg["no_vpn"][i]
+            self.ex_cur = -1
+            self.rebuild_ex()
+            if was_open:  # открытое исключение убрали — показать соседнее или первый VPN
+                if self.cfg["no_vpn"]:
+                    self.select_ex(min(i, len(self.cfg["no_vpn"]) - 1))
+                else:
+                    self.select(0 if self.cfg["vpns"] else -1)
+        card.setEnabled(False)
+        card._out = animate(card, 200, lambda v: card.setFixedHeight(max(0, int(54 * (1 - v)))), done,
+                            curve=QEasingCurve.InCubic)
+
     # -- кто подключён прямо сейчас — зелёная точка на карточке
     def check_status(self):
         try:
@@ -2314,8 +2478,8 @@ class VpnDialog(QDialog):
                 v["name"] = f"{base} {n}"
                 n += 1
             names.add(v["name"])
-        rules = {r for v in self.cfg["vpns"] for r in v.get("apps", [])} | set(self.no_vpn.items())
+        rules = {r for v in self.cfg["vpns"] for r in v.get("apps", [])} | set(self.cfg["no_vpn"])
         icons = {exe_rule(r).lower(): self.icons.path(r) for r in rules
                  if not r.lower().startswith("окно:") and self.icons.path(r)}
-        self.cfg.update(no_vpn=self.no_vpn.items(), delay=self.delay.value(), auto=self.auto.on, icons=icons)
+        self.cfg.update(delay=self.delay.value(), auto=self.auto.on, icons=icons)
         return self.cfg
