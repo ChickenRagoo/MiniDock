@@ -7,6 +7,11 @@ VPN мешает (банк, Госуслуги, маркетплейсы).
 виджета (настройки хранятся рядом, в vpn_auto.json).
 
 Какие VPN умеет:
+    Программа    — просто .exe любого VPN-клиента; как им управлять, виджет решает сам:
+                   WireGuard, AmneziaWG, OpenVPN GUI — включает их туннели напрямую;
+                   Cloudflare WARP, Mullvad, Windscribe, NordVPN — через их командную строку;
+                   остальные (Amnezia VPN, Hiddify, v2rayN, Happ, Proton…) — запускает программу, когда VPN нужен,
+                   и закрывает, когда нет (в самой программе надо включить «подключаться при запуске»)
     Windows VPN  — подключения из «Параметры → Сеть → VPN» (имя подключения как там)
     WireGuard    — файл туннеля .conf (WireGuard для Windows)
     AmneziaWG    — файл туннеля .conf (клиент AmneziaWG; такой файл можно выгрузить и из Amnezia VPN)
@@ -38,7 +43,7 @@ from minidock.winapi import enable_blur, exe_description, extract_icon, round_wi
 
 CFG_PATH = WIDGETS_DIR / "vpn_auto.json"
 NO_WINDOW = 0x08000000
-KINDS = [("windows", "Windows VPN"), ("wireguard", "WireGuard"), ("amneziawg", "AmneziaWG"),
+KINDS = [("app", "Программа"), ("windows", "Windows VPN"), ("wireguard", "WireGuard"), ("amneziawg", "AmneziaWG"),
          ("openvpn", "OpenVPN"), ("command", "Свои команды")]
 KIND_NAMES = dict(KINDS)
 # что обычно не открывается без VPN или, наоборот, с ним — подсказка в настройках
@@ -97,11 +102,18 @@ def find_exe(*candidates):
 # каждая функция возвращает текст ошибки или "" при успехе
 
 def _tunnel(vpn):
-    """Имя туннеля WireGuard/AmneziaWG — имя файла .conf без расширения."""
-    return os.path.splitext(os.path.basename(vpn.get("target", "")))[0]
+    """Имя туннеля — имя файла без .conf / .conf.dpapi (так хранит туннели сам WireGuard) / .ovpn."""
+    base = os.path.basename(vpn.get("target", ""))
+    for ext in (".dpapi", ".conf", ".ovpn"):
+        if base.lower().endswith(ext):
+            base = base[:-len(ext)]
+    return base
 
 
-def _wg_exe(kind):
+def _wg_exe(kind, vpn=None):
+    client = (vpn or {}).get("client", "")
+    if client and os.path.isfile(client):  # VPN задан программой — её и используем
+        return client
     if kind == "amneziawg":
         return find_exe(r"%ProgramFiles%\AmneziaWG\amneziawg.exe", "amneziawg.exe")
     return find_exe(r"%ProgramFiles%\WireGuard\wireguard.exe", "wireguard.exe")
@@ -113,11 +125,181 @@ def _wg_service(vpn):
 
 
 def _ovpn_name(vpn):
-    return os.path.splitext(os.path.basename(vpn.get("target", "")))[0]
+    return _tunnel(vpn)
+
+
+# -- «Программа»: VPN задан просто своим .exe, способ управления виджет находит сам ----------------
+# Клиенты с туннелями, которыми управляем напрямую (как вид WireGuard / AmneziaWG / OpenVPN)
+TUNNEL_CLIENTS = {"wireguard.exe": "wireguard", "amneziawg.exe": "amneziawg", "openvpn-gui.exe": "openvpn"}
+# Клиенты с командной строкой: (их .exe, утилита рядом с ними, подключить, отключить, состояние)
+CLI_CLIENTS = [
+    (("cloudflare warp.exe", "warp-cli.exe"), ("warp-cli.exe",), ["connect"], ["disconnect"], ["status"]),
+    (("mullvad vpn.exe", "mullvad.exe"), (r"resources\mullvad.exe", "mullvad.exe"), ["connect"], ["disconnect"],
+     ["status"]),
+    (("windscribe.exe", "windscribe-cli.exe"), ("windscribe-cli.exe",), ["connect"], ["disconnect"], ["status"]),
+    (("nordvpn.exe",), ("nordvpn.exe",), ["-c"], ["-d"], None),
+]
+
+
+def detect(exe):
+    """Как управлять VPN-программой: {"mode": "tunnel" | "cli" | "process", ...}."""
+    name = os.path.basename(exe or "").lower()
+    if name in TUNNEL_CLIENTS:
+        return {"mode": "tunnel", "kind": TUNNEL_CLIENTS[name]}
+    folder = os.path.dirname(exe or "")
+    for names, tools, on, off, status in CLI_CLIENTS:
+        if name in names:
+            for tool in tools:
+                path = os.path.join(folder, tool)
+                if os.path.isfile(path):
+                    return {"mode": "cli", "cli": path, "on": on, "off": off, "status": status}
+    return {"mode": "process"}
+
+
+def tunnels(kind, exe):
+    """[(название, путь)] туннелей, уже добавленных в клиент. None — папку не прочитать (нужны права)."""
+    folder = os.path.dirname(exe or "")
+    out = []
+    if kind in ("wireguard", "amneziawg"):
+        conf = os.path.join(folder, "Data", "Configurations")
+        try:
+            names = os.listdir(conf)
+        except PermissionError:
+            return None
+        except OSError:
+            return []
+        for f in sorted(names):
+            if f.lower().endswith((".conf.dpapi", ".conf")):
+                out.append((_tunnel({"target": f}), os.path.join(conf, f)))
+    elif kind == "openvpn":
+        for base in (os.path.join(os.path.expanduser("~"), "OpenVPN", "config"),
+                     os.path.join(os.path.dirname(folder), "config")):
+            for root, _, files in os.walk(base):
+                for f in sorted(files):
+                    if f.lower().endswith(".ovpn"):
+                        out.append((f[:-5], os.path.join(root, f)))
+    return out
+
+
+def resolve(vpn):
+    """Вид «Программа» -> настоящий способ управления (остальные виды — как есть)."""
+    if vpn.get("kind") != "app":
+        return vpn
+    d = detect(vpn.get("target", ""))
+    if d["mode"] == "tunnel":
+        return dict(vpn, kind=d["kind"], target=vpn.get("tunnel", ""), client=vpn.get("target", ""))
+    if d["mode"] == "cli":
+        return dict(vpn, kind="cli", cli=d["cli"], on=d["on"], off=d["off"], status=d["status"])
+    return dict(vpn, kind="process")
+
+
+VPN_WORDS = ("vpn", "wireguard", "amnezia", "hiddify", "v2ray", "nekoray", "nekobox", "throne", "happ", "outline",
+             "clash", "warp", "windscribe", "mullvad", "proton", "nord", "psiphon", "lantern", "sing-box", "karing",
+             "invizible", "proxy")
+
+
+def find_vpn_apps():
+    """[(путь .exe)] VPN-программ, установленных на компьютере, — по ярлыкам меню «Пуск»."""
+    from minidock.winapi import resolve_lnk
+    found = {}
+    for base in (os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"),
+                 os.path.expandvars(r"%ProgramData%\Microsoft\Windows\Start Menu\Programs")):
+        for root, _, files in os.walk(base):
+            for f in files:
+                low = os.path.join(root, f).lower()
+                if (not low.endswith(".lnk") or not any(w in low for w in VPN_WORDS)
+                        or any(b in f.lower() for b in ("unins", "uninstall", "readme", "help", "viewer"))):
+                    continue
+                target = resolve_lnk(os.path.join(root, f))[0]
+                if target.lower().endswith(".exe") and os.path.isfile(target):
+                    found.setdefault(target.lower(), target)
+    return list(found.values())
+
+
+_needs_admin = {}
+
+
+def needs_admin(exe):
+    """Программа сама просит права администратора (в её манифесте requireAdministrator)."""
+    if exe not in _needs_admin:
+        hit = False
+        try:
+            with open(exe, "rb") as f:
+                tail = b""
+                while True:
+                    chunk = f.read(8 << 20)
+                    if not chunk:
+                        break
+                    if b"requireAdministrator" in tail + chunk:
+                        hit = True
+                        break
+                    tail = chunk[-32:]
+        except OSError:
+            pass
+        _needs_admin[exe] = hit
+    return _needs_admin[exe]
+
+
+def _session(pid):
+    sid = ctypes.c_ulong(0)
+    ok = ctypes.windll.kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid))
+    return sid.value if ok else 0
+
+
+def app_processes(exe):
+    """Процессы VPN-программы: сам .exe и всё, что запущено из его папки (лаунчеры вроде Proton запускают
+    другой .exe рядом), кроме служб — они работают всегда и о подключении ничего не говорят."""
+    exe_l = os.path.normcase(exe)
+    folder = os.path.dirname(exe_l)
+    broad = len(folder) <= 3 or os.path.basename(folder) in ("program files", "program files (x86)", "desktop",
+                                                               "downloads", "загрузки")
+    name = os.path.basename(exe_l)
+    out = []
+    for p in psutil.process_iter(["name", "exe"]):
+        try:
+            pe = os.path.normcase(p.info["exe"] or "")
+            same = pe == exe_l or (not pe and (p.info["name"] or "").lower() == name)
+            near = pe and not broad and pe.startswith(folder + os.sep)
+            if (same or near) and _session(p.pid) != 0:
+                out.append(p)
+        except Exception:
+            pass
+    return out
+
+
+def reset_local_proxy():
+    """Убитый прокси-клиент (v2rayN, Hiddify, Happ…) не успевает вернуть системный прокси, и интернет пропадает.
+    Если прокси Windows указывает на этот компьютер — выключаем его."""
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as k:
+            on = winreg.QueryValueEx(k, "ProxyEnable")[0]
+            server = str(winreg.QueryValueEx(k, "ProxyServer")[0]).lower()
+            if on and ("127.0.0.1" in server or "localhost" in server):
+                winreg.SetValueEx(k, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+                wininet = ctypes.windll.wininet
+                wininet.InternetSetOptionW(0, 39, None, 0)  # INTERNET_OPTION_SETTINGS_CHANGED
+                wininet.InternetSetOptionW(0, 37, None, 0)  # INTERNET_OPTION_REFRESH
+    except OSError:
+        pass
+
+
+_launched = {}  # путь .exe -> когда запускали (чтобы не запускать снова, пока он открывается)
+_cli_state = {}  # у клиентов без команды «состояние» помним сами
 
 
 def is_connected(vpn):
+    vpn = resolve(vpn)
     kind, target = vpn["kind"], vpn.get("target", "")
+    if kind == "cli":
+        if not vpn.get("status"):
+            return _cli_state.get(vpn["cli"], False)
+        import re
+        code, out = run([vpn["cli"]] + vpn["status"], timeout=10)
+        return code == 0 and re.search(r"\bconnected\b", out.lower()) is not None  # «Disconnected» не подходит
+    if kind == "process":
+        return bool(target) and bool(app_processes(target))
     if kind == "windows":
         code, out = run(["rasdial"], timeout=10)
         return code == 0 and target.lower() in out.lower()
@@ -141,16 +323,37 @@ def is_connected(vpn):
 
 
 def connect(vpn):
+    vpn = resolve(vpn)
     kind, target = vpn["kind"], vpn.get("target", "")
+    if kind == "cli":
+        code, out = run([vpn["cli"]] + vpn["on"])
+        if code == 0:
+            _cli_state[vpn["cli"]] = True
+        return "" if code == 0 else out.splitlines()[0] if out else f"код {code}"
+    if kind == "process":
+        if not os.path.isfile(target):
+            return "программа VPN не найдена — выберите её заново"
+        if app_processes(target) or time.monotonic() - _launched.get(target, -999) < 60:
+            return ""  # уже запущена или только что запускали
+        _launched[target] = time.monotonic()
+        folder = os.path.dirname(target)
+        if needs_admin(target) and is_admin():  # запустится с правами MiniDock — без лишнего вопроса UAC
+            subprocess.Popen([target], cwd=folder)
+        else:  # как обычный пользователь, даже если MiniDock от администратора
+            from minidock.winapi import launch
+            launch(target, folder)
+        return ""
     if kind == "windows":
         code, out = run(["rasdial", target])
         return "" if code == 0 else out.splitlines()[0] if out else f"код {code}"  # первая строка — суть ошибки
     if kind in ("wireguard", "amneziawg"):
-        exe = _wg_exe(kind)
+        exe = _wg_exe(kind, vpn)
         if not exe:
             return f"не установлен {KIND_NAMES[kind]}"
         if not is_admin():
             return "нужен режим администратора MiniDock (Настройки → Основные)"
+        if not target:
+            return "не выбран туннель"
         if not os.path.isfile(target):
             return "не найден файл туннеля .conf"
         code, out = run([exe, "/installtunnelservice", target])
@@ -175,12 +378,37 @@ def connect(vpn):
 
 
 def disconnect(vpn):
+    vpn = resolve(vpn)
     kind, target = vpn["kind"], vpn.get("target", "")
+    if kind == "cli":
+        code, out = run([vpn["cli"]] + vpn["off"])
+        if code == 0:
+            _cli_state[vpn["cli"]] = False
+        return "" if code == 0 else out.splitlines()[0] if out else f"код {code}"
+    if kind == "process":
+        procs = app_processes(target)
+        for p in list(procs):
+            try:
+                procs += p.children(recursive=True)  # ядро (sing-box, xray) — дочерний процесс
+            except psutil.Error:
+                pass
+        denied = False
+        for p in reversed(procs):
+            try:
+                p.kill()
+            except psutil.AccessDenied:
+                denied = True
+            except psutil.Error:
+                pass
+        _launched.pop(target, None)
+        time.sleep(0.5)
+        reset_local_proxy()
+        return "нужен режим администратора MiniDock (Настройки → Основные)" if denied else ""
     if kind == "windows":
         code, out = run(["rasdial", target, "/disconnect"])
         return "" if code == 0 else out or f"код {code}"
     if kind in ("wireguard", "amneziawg"):
-        exe = _wg_exe(kind)
+        exe = _wg_exe(kind, vpn)
         if not exe:
             return f"не установлен {KIND_NAMES[kind]}"
         if not is_admin():
@@ -423,6 +651,7 @@ ACCENT = QColor("#0a84ff")
 TEXT = QColor(242, 242, 245)
 DIM = QColor(255, 255, 255, 135)
 KIND_STYLE = {  # подпись на значке и цвет вида VPN
+    "app": ("EXE", "#30b0c7", "Любой VPN — его .exe"),
     "windows": ("Win", "#0a84ff", "Встроенный в Windows"),
     "wireguard": ("WG", "#c4302b", "Файл туннеля .conf"),
     "amneziawg": ("AWG", "#8e5cf7", "Файл .conf из Amnezia"),
@@ -952,7 +1181,9 @@ class AppPicker(QDialog):
     picked = Signal(str, object)
 
     def __init__(self, icons, parent):
-        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        # окно настроек всегда поверх остальных — без этого флага окно выбора открывалось под ним (невидимым)
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+                         | Qt.WindowStaysOnTopHint)
         self.setObjectName("picker")
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -1142,7 +1373,18 @@ class VpnCard(Anim):
             p.drawText(QRectF(58, 32, self.width() - 70, 20), Qt.AlignVCenter,
                        f"Банки, Госуслуги · {n} {plural(n, 'правило', 'правила', 'правил')}" if n else "Банки, Госуслуги")
             return
-        p.drawPixmap(12, 13, letter_icon(KIND_STYLE[kind][0], KIND_STYLE[kind][1], 36))
+        target = self.vpn.get("target", "")
+        icon = None
+        if kind == "app" and target:  # у «Программы» — значок самой VPN-программы
+            if getattr(self, "_icon_for", None) != target:
+                self._icon_for = target
+                self._icon = extract_icon(target, 0, 64) if os.path.isfile(target) else None
+            icon = self._icon
+        if icon is not None:
+            p.setRenderHint(QPainter.SmoothPixmapTransform)
+            p.drawPixmap(QRectF(12, 13, 36, 36).toRect(), icon)
+        else:
+            p.drawPixmap(12, 13, letter_icon(KIND_STYLE[kind][0], KIND_STYLE[kind][1], 36))
         if self.online:  # зелёная точка — подключён прямо сейчас
             p.setPen(QPen(QColor(34, 34, 40), 2))
             p.setBrush(QColor(48, 209, 88))
@@ -1214,7 +1456,7 @@ class KindTile(Anim):
         self.kind = kind
         self.sel = 0.0
         self.selected = False
-        self.setFixedSize(112, 80)
+        self.setFixedSize(102, 80)
         self.setCursor(Qt.PointingHandCursor)
 
     def set_selected(self, on):
@@ -1269,7 +1511,7 @@ class DropZone(Anim):
         self.setCursor(Qt.PointingHandCursor)
 
     def ext(self):
-        return ".ovpn" if self.kind == "openvpn" else ".conf"
+        return {"openvpn": (".ovpn",), "app": (".exe", ".lnk")}.get(self.kind, (".conf",))
 
     def set_path(self, path):
         self.path = path
@@ -1285,7 +1527,7 @@ class DropZone(Anim):
 
     def dragEnterEvent(self, e):
         urls = e.mimeData().urls()
-        if urls and urls[0].toLocalFile().lower().endswith(self.ext()):
+        if urls and urls[0].toLocalFile().lower().endswith(self.ext()):  # ext() — кортеж окончаний
             e.acceptProposedAction()
             self.anim_drag(True)
 
@@ -1294,17 +1536,28 @@ class DropZone(Anim):
 
     def dropEvent(self, e):
         self.anim_drag(False)
-        path = os.path.normpath(e.mimeData().urls()[0].toLocalFile())
+        path = self.real(os.path.normpath(e.mimeData().urls()[0].toLocalFile()))
         self.set_path(path)
         self.changed.emit(path)
+
+    @staticmethod
+    def real(path):
+        """Ярлык -> программа, на которую он указывает."""
+        if path.lower().endswith(".lnk"):
+            from minidock.winapi import resolve_lnk
+            target = resolve_lnk(path)[0]
+            return os.path.normpath(target) if target else path
+        return path
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton:
             return
-        flt = "Конфигурация OpenVPN (*.ovpn)" if self.kind == "openvpn" else "Туннель (*.conf)"
-        path, _ = QFileDialog.getOpenFileName(self, "Файл VPN", os.path.dirname(self.path), flt)
+        flt = {"openvpn": "Конфигурация OpenVPN (*.ovpn)", "app": "Программа VPN (*.exe *.lnk)"}.get(
+            self.kind, "Туннель (*.conf)")
+        start = os.path.dirname(self.path) or (os.environ.get("ProgramFiles", "") if self.kind == "app" else "")
+        path, _ = QFileDialog.getOpenFileName(self, "Файл VPN", start, flt)
         if path:
-            self.set_path(os.path.normpath(path))
+            self.set_path(self.real(os.path.normpath(path)))
             self.changed.emit(self.path)
 
     def paintEvent(self, e):
@@ -1322,10 +1575,17 @@ class DropZone(Anim):
         if self.path:
             ok = os.path.isfile(self.path)
             label, color, _ = KIND_STYLE[self.kind]
-            p.drawPixmap(14, 14, letter_icon(label, color, 36))
+            icon = extract_icon(self.path, 0, 64) if self.kind == "app" and ok else None
+            if icon is not None:  # у программы — её собственный значок
+                p.setRenderHint(QPainter.SmoothPixmapTransform)
+                p.drawPixmap(QRectF(14, 14, 36, 36).toRect(), icon)
+            else:
+                p.drawPixmap(14, 14, letter_icon(label, color, 36))
+            title = (exe_description(self.path) or os.path.basename(self.path)) if self.kind == "app" and ok \
+                else os.path.basename(self.path)
             p.setPen(TEXT)
             p.setFont(font(10, True))
-            p.drawText(QRectF(62, 10, self.width() - 80, 22), Qt.AlignVCenter, os.path.basename(self.path))
+            p.drawText(QRectF(62, 10, self.width() - 80, 22), Qt.AlignVCenter, title)
             p.setPen(DIM if ok else QColor(255, 120, 110))
             p.setFont(font(8))
             fm = QFontMetricsF(font(8))
@@ -1335,8 +1595,8 @@ class DropZone(Anim):
         else:
             p.setPen(QColor(150, 200, 255))
             p.setFont(font(10, True))
-            p.drawText(QRectF(0, 10, self.width(), 24), Qt.AlignCenter,
-                       f"Перетащите сюда файл {self.ext()}")
+            what = "программу VPN (.exe или ярлык)" if self.kind == "app" else "файл " + self.ext()[0]
+            p.drawText(QRectF(0, 10, self.width(), 24), Qt.AlignCenter, f"Перетащите сюда {what}")
             p.setPen(DIM)
             p.setFont(font(8))
             p.drawText(QRectF(0, 34, self.width(), 20), Qt.AlignCenter, "или нажмите, чтобы выбрать")
@@ -1445,6 +1705,8 @@ QLabel#h { font: bold 13pt 'Segoe UI'; }
 QLabel#sub { font: bold 9pt 'Segoe UI'; color: rgba(255, 255, 255, 200); margin-top: 4px; }
 QLabel#dim { color: rgba(255, 255, 255, 135); font: 8pt 'Segoe UI'; }
 QLabel#warn { color: #ffb340; font: 8pt 'Segoe UI'; }
+QLabel#how { color: #7fe0a0; font: 8pt 'Segoe UI'; background: rgba(48, 209, 88, 22); border-radius: 8px;
+    padding: 8px 10px; }
 QLineEdit, QComboBox, QSpinBox { background: rgba(255, 255, 255, 16); border: 1px solid rgba(255, 255, 255, 18);
     border-radius: 8px; padding: 6px 10px; font: 9pt 'Segoe UI'; selection-background-color: #0a84ff; }
 QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #0a84ff; }
@@ -1703,6 +1965,32 @@ class VpnDialog(QDialog):
         self.drop = DropZone()
         self.drop.changed.connect(self.file_chosen)
         lay.addWidget(self.drop)
+        # «Программа»: найденные на компьютере VPN — одним нажатием
+        self.found_row = QWidget()
+        fl = QVBoxLayout(self.found_row)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(6)
+        cap = QLabel("Найдено на этом компьютере — нажмите, чтобы выбрать:")
+        cap.setObjectName("dim")
+        fl.addWidget(cap)
+        self.found_box = QWidget()
+        self.found_flow = FlowLayout(self.found_box, 6)
+        fl.addWidget(self.found_box)
+        lay.addWidget(self.found_row)
+        self.found = None
+        # как виджет будет управлять выбранной программой
+        self.how = QLabel()
+        self.how.setObjectName("how")
+        self.how.setWordWrap(True)
+        lay.addWidget(self.how)
+        self.tunnel_row = QWidget()
+        tr = QHBoxLayout(self.tunnel_row)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tr.addWidget(QLabel("Туннель"))
+        self.tunnel = QComboBox()
+        self.tunnel.currentIndexChanged.connect(self.store)
+        tr.addWidget(self.tunnel, 1)
+        lay.addWidget(self.tunnel_row)
         self.win_row = QWidget()
         wr = QHBoxLayout(self.win_row)
         wr.setContentsMargins(0, 0, 0, 0)
@@ -1752,15 +2040,74 @@ class VpnDialog(QDialog):
     def kind(self):
         return next((k for k, t in self.kind_tiles.items() if t.selected), "windows")
 
+    def show_found(self):
+        """Кнопки найденных VPN-программ (ищем один раз за открытие окна)."""
+        if self.found is None:
+            self.found = find_vpn_apps()
+            for path in self.found:
+                rule = os.path.basename(path)
+                self.icons.learn(rule, path)
+                chip = Chip(rule, self.icons, ghost=True)
+                chip.clicked.connect(lambda _r, p=path: self.pick_app(p))
+                self.found_flow.addWidget(chip)
+        self.found_row.setVisible(bool(self.found))
+
+    def pick_app(self, path):
+        self.drop.set_path(path)
+        self.file_chosen(path)
+
+    def update_how(self):
+        """Подпись «как виджет будет управлять» и выбор туннеля — для вида «Программа»."""
+        path = self.drop.path
+        self.tunnel_row.setVisible(False)
+        if self.kind() != "app" or not path or not os.path.isfile(path):
+            self.how.setVisible(False)
+            return
+        name = exe_description(path) or os.path.basename(path)
+        d = detect(path)
+        if d["mode"] == "tunnel":
+            kind = d["kind"]
+            items = tunnels(kind, path)
+            if items is None:
+                text = (f"{name}: виджет будет включать туннели напрямую. Чтобы увидеть их список, включите в MiniDock "
+                        "«Работать с правами администратора» (Настройки → Основные).")
+            elif not items:
+                text = f"{name}: туннелей пока нет — добавьте туннель в самой программе, и он появится здесь."
+            else:
+                text = f"✓  {name}: виджет будет включать и выключать туннель напрямую, без окон. Какой туннель?"
+                want = self.cfg["vpns"][self.cur].get("tunnel", "") if 0 <= self.cur < len(self.cfg["vpns"]) else ""
+                was = self.loading
+                self.loading = True
+                self.tunnel.clear()
+                for label, tpath in items:
+                    self.tunnel.addItem(label, tpath)
+                i = self.tunnel.findData(want)
+                self.tunnel.setCurrentIndex(max(0, i))
+                self.loading = was
+                self.tunnel_row.setVisible(True)
+        elif d["mode"] == "cli":
+            text = f"✓  {name}: у программы есть командная строка — виджет будет подключать и отключать VPN напрямую."
+        else:
+            text = (f"{name}: командной строки у неё нет, поэтому виджет будет запускать программу, когда VPN нужен, "
+                    "и закрывать, когда нет. Включите в её настройках «подключаться при запуске».")
+            if needs_admin(path) and not is_admin():
+                text += " Программа просит права администратора — включите их и для MiniDock, иначе каждый запуск спросит UAC."
+        self.how.setText(text)
+        self.how.setVisible(True)
+
     def set_kind(self, kind, store=True):
         for k, t in self.kind_tiles.items():
             t.set_selected(k == kind)
-        file_kind = kind in ("wireguard", "amneziawg", "openvpn")
+        file_kind = kind in ("wireguard", "amneziawg", "openvpn", "app")
         self.drop.kind = kind
         self.drop.setVisible(file_kind)
+        self.found_row.setVisible(False)
+        if kind == "app":
+            self.show_found()
         self.win_row.setVisible(kind == "windows")
         self.cmd_box.setVisible(kind == "command")
-        titles = {"windows": ("Подключение Windows", "Выберите VPN, который уже добавлен в «Параметры → Сеть → VPN»."),
+        titles = {"app": ("Программа VPN", "Укажите .exe своего VPN — виджет сам разберётся, как им управлять."),
+                  "windows": ("Подключение Windows", "Выберите VPN, который уже добавлен в «Параметры → Сеть → VPN»."),
                   "wireguard": ("Файл туннеля", "Файл .conf, который выдал ваш VPN-сервис."),
                   "amneziawg": ("Файл туннеля", "В Amnezia VPN: «Поделиться» → формат AmneziaWG — получится файл .conf."),
                   "openvpn": ("Файл конфигурации", "Файл .ovpn от вашего VPN-сервиса."),
@@ -1776,7 +2123,7 @@ class VpnDialog(QDialog):
             lab.setWordWrap(True)
             self.target_title.layout().addWidget(lab)
         warn, client = [], ""
-        if file_kind:
+        if file_kind and kind != "app":
             exe = (_wg_exe(kind) if kind != "openvpn"
                    else find_exe(r"%ProgramFiles%\OpenVPN\bin\openvpn-gui.exe", "openvpn-gui.exe"))
             if not exe:
@@ -1791,12 +2138,15 @@ class VpnDialog(QDialog):
         self.warn.setVisible(bool(warn))
         self.get_client.setText(client)
         self.get_client.setVisible(bool(client))
+        self.update_how()
         if store:
             self.store()
 
     def file_chosen(self, path):
         if not self.name.text().strip() or self.name.text().startswith("VPN "):
-            self.name.setText(os.path.splitext(os.path.basename(path))[0])
+            nice = exe_description(path) if path.lower().endswith(".exe") else None
+            self.name.setText(nice or os.path.splitext(os.path.basename(path))[0])
+        self.update_how()
         self.store()
 
     # -- данные <-> форма
@@ -1806,7 +2156,9 @@ class VpnDialog(QDialog):
         kind = self.kind()
         v = self.cfg["vpns"][self.cur]
         target = (self.win_name.currentText().strip() if kind == "windows"
-                  else self.drop.path if kind in ("wireguard", "amneziawg", "openvpn") else "")
+                  else self.drop.path if kind in ("wireguard", "amneziawg", "openvpn", "app") else "")
+        if kind == "app" and self.tunnel_row.isVisible():
+            v["tunnel"] = self.tunnel.currentData() or ""
         v.update(name=self.name.text().strip(), kind=kind, target=target, on=self.on_cmd.text().strip(),
                  off=self.off_cmd.text().strip(), check=self.check_cmd.text().strip(), apps=self.apps.items())
         if self.cur < len(self.cards):
@@ -1833,7 +2185,7 @@ class VpnDialog(QDialog):
         self.win_name.clear()
         self.win_name.addItems(windows_vpns())
         self.win_name.setCurrentText(v.get("target", "") if kind == "windows" else "")
-        self.drop.set_path(v.get("target", "") if kind in ("wireguard", "amneziawg", "openvpn") else "")
+        self.drop.set_path(v.get("target", "") if kind in ("wireguard", "amneziawg", "openvpn", "app") else "")
         self.on_cmd.setText(v.get("on", ""))
         self.off_cmd.setText(v.get("off", ""))
         self.check_cmd.setText(v.get("check", ""))
@@ -1863,8 +2215,7 @@ class VpnDialog(QDialog):
 
     def add_vpn(self):
         n = len(self.cfg["vpns"]) + 1
-        kind = "amneziawg" if _wg_exe("amneziawg") else "wireguard" if _wg_exe("wireguard") else "windows"
-        self.cfg["vpns"].append(dict(name=f"VPN {n}", kind=kind, target="", apps=[]))
+        self.cfg["vpns"].append(dict(name=f"VPN {n}", kind="app", target="", apps=[]))
         self.rebuild_cards()
         card = self.cards[-1]
         card._in = animate(card, 260, lambda v: (card.setFixedHeight(int(62 * v)), card.update()),
