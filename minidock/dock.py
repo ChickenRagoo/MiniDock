@@ -21,7 +21,7 @@ from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 from .folders import FolderPopup, folder_pixmap
 from .ui import (GLASS, TOP_FLAGS, MacMenu, lerp_rect, live_for, make_glass, paint_background, popup_menu, precise_timer,
                  smooth)
-from .winapi import (appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, launch, resolve_lnk,
+from .winapi import (app_key, current_path, appbar_release, appbar_reserve, exe_description, extract_icon, file_icon, launch, resolve_lnk,
                      syscommand, window_monitor)
 
 
@@ -54,6 +54,7 @@ class Item:
 
     @classmethod
     def from_path(cls, path, kind="app"):
+        path = current_path(path)  # программа обновилась — её новая папка
         it = cls(kind, path)
         lower = path.lower()
         it.exe = (resolve_lnk(path)[0] if lower.endswith(".lnk") else path).lower()
@@ -84,10 +85,20 @@ class Item:
             return False
         if exe == self.exe:
             return True
+        mine = app_key(self.exe)
+        if app_key(exe) == mine:  # та же программа, только версия новее (…\app-1.2.3\…)
+            return True
         # Лаунчеры (Discord Update.exe, Steam) открывают окна из других exe в своей папке
-        folder = os.path.dirname(self.exe) + os.sep
+        folder = os.path.dirname(mine) + os.sep
         sysroot = os.environ.get("SystemRoot", r"C:\Windows").lower()
-        return not folder.startswith(sysroot) and exe.startswith(folder)
+        if folder.startswith(sysroot) or not exe.startswith(folder):
+            return False
+        # …но игры в библиотеке лаунчера (Steam\steamapps\common\…, …\games\…) — это отдельные программы
+        inner = exe[len(folder):].split(os.sep)[:-1]
+        return not any(p in LIBRARY_DIRS for p in inner)
+
+
+LIBRARY_DIRS = {"steamapps", "common", "games", "game", "library"}
 
 
 def make_trash():
@@ -806,6 +817,16 @@ class Dock(QWidget):
         if self.cfg["bounce"]:
             it.bounce_start = time.monotonic()
             self.wake()
+        if not os.path.exists(it.path) and "://" not in it.path and not it.path.lower().startswith("shell:"):
+            new = current_path(it.path)  # программа обновилась, пока MiniDock работал
+            if new != it.path and os.path.exists(new):
+                it.path, it.exe = new, new.lower()
+                self.save_pinned()
+            else:  # файла нет — не запускать: Проводник открыл бы вместо программы «Документы»
+                it.bounce_start = None
+                print(f"[{time.strftime('%H:%M:%S')}] программы из дока больше нет: {it.path}", file=sys.stderr,
+                      flush=True)
+                return
         self.app.animator.expect_launch(it.exe, self.icon_screen_rect(it))
         try:
             folder = os.path.dirname(it.path) if os.path.isfile(it.path) else None
@@ -817,7 +838,13 @@ class Dock(QWidget):
     # -- pin management
     @staticmethod
     def load_pinned(entries):
-        """В настройках: путь программы или {"folder": имя, "items": [пути]}."""
+        """В настройках: путь программы или {"folder": имя, "items": [пути]}.
+        Пути обновившихся программ (…\app-1.2.3\…) исправляются на месте — в самом списке entries."""
+        for i, e in enumerate(entries):
+            if isinstance(e, dict):
+                e["items"] = [current_path(p) for p in e.get("items", [])]
+            else:
+                entries[i] = current_path(e)
         out = []
         for e in entries:
             if isinstance(e, dict):

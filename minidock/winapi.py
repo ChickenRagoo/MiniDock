@@ -1,6 +1,7 @@
 """Обёртки над Windows API: окна, панель задач, трей, иконки, размытие, рабочая область."""
 import ctypes
 import os
+import re
 import sys
 import threading
 import winreg
@@ -234,6 +235,38 @@ def enum_start_apps():
 
 
 # ---------------------------------------------------------------- windows
+
+_VERSIONED = re.compile(r"^(.*)\\app-(\d+(?:\.\d+)*)\\([^\\]+\.exe)$", re.I)
+
+
+def app_key(path):
+    """Путь программы без папки версии: Discord, Claude, Slack и другие ставят каждую версию в
+    …\\app-1.2.3\\x.exe — для дока это одна и та же программа."""
+    m = _VERSIONED.match(path or "")
+    return (m.group(1) + "\\" + m.group(3)).lower() if m else (path or "").lower()
+
+
+def current_path(path):
+    """Программа обновилась, и папки её старой версии больше нет — путь к самой новой версии
+    (или тот же путь, если файл на месте или найти не удалось)."""
+    if not path or os.path.exists(path):
+        return path
+    m = _VERSIONED.match(path)
+    if not m:
+        return path
+    root, exe = m.group(1), m.group(3)
+    best = None
+    try:
+        for d in os.listdir(root):
+            v = re.fullmatch(r"app-(\d+(?:\.\d+)*)", d, re.I)
+            if v and os.path.isfile(os.path.join(root, d, exe)):
+                ver = tuple(int(x) for x in v.group(1).split("."))
+                if best is None or ver > best[0]:
+                    best = (ver, os.path.join(root, d, exe))
+    except OSError:
+        return path
+    return best[1] if best else path
+
 
 def window_exe(hwnd):
     try:
