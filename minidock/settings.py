@@ -394,6 +394,7 @@ class SettingsWindow(QWidget):
             self.toggle("dock_border", "Светлая обводка"),
             self.toggle("dock_border_light", "Блик от курсора",
                         "Обводка дока становится светлее там, где курсор, — будто он светит."),
+            self.slider("dock_light_strength", "Яркость блика", 0.05, 1.0, scale=100, fmt="{:.0%}"),
         ])
         self.group(lay, self.live_parts_rows())
         lay.addStretch()

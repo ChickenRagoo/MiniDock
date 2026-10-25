@@ -63,6 +63,7 @@ DEFAULT_CFG = {
     "dock_radius": 0.3,           # скругление, доля размера иконки
     "dock_border": True,
     "dock_border_light": True,    # обводка светлее там, где курсор (как блик от фонарика)
+    "dock_light_strength": 0.4,   # яркость этого блика, 0..1
     # анимации окон
     "animations": True,
     "minimize_effect": "genie",   # genie | scale

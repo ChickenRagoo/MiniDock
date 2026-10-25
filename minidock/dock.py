@@ -666,8 +666,9 @@ class Dock(QWidget):
             if cfg["dock_border_light"] and self.hover > 0.01 and self.light_pos is not None:
                 # курсор — как фонарик: рядом с ним обводка становится светлее, к краям пятна — как была
                 glow = QRadialGradient(self.light_pos, B * 2.4)
-                glow.setColorAt(0.0, QColor(255, 255, 255, int(150 * self.hover)))
-                glow.setColorAt(0.45, QColor(255, 255, 255, int(55 * self.hover)))
+                k = self.hover * max(0.0, min(1.0, float(cfg["dock_light_strength"])))
+                glow.setColorAt(0.0, QColor(255, 255, 255, int(150 * k)))
+                glow.setColorAt(0.45, QColor(255, 255, 255, int(55 * k)))
                 glow.setColorAt(1.0, QColor(255, 255, 255, 0))
                 p.setPen(QPen(QBrush(glow), 1.2))
                 p.setBrush(Qt.NoBrush)
