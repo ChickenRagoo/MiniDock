@@ -392,6 +392,8 @@ class SettingsWindow(QWidget):
             self.slider("glass_radius", "Сила размытия", 4, 40, fmt="{:.0f}"),
             self.slider("dock_radius", "Скругление углов", 0, 0.5, scale=100, fmt="{:.2f}"),
             self.toggle("dock_border", "Светлая обводка"),
+            self.toggle("dock_border_light", "Блик от курсора",
+                        "Обводка дока становится светлее там, где курсор, — будто он светит."),
         ])
         self.group(lay, self.live_parts_rows())
         lay.addStretch()

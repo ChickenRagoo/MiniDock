@@ -62,6 +62,7 @@ DEFAULT_CFG = {
     "glass_radius": 18,           # сила размытия
     "dock_radius": 0.3,           # скругление, доля размера иконки
     "dock_border": True,
+    "dock_border_light": True,    # обводка светлее там, где курсор (как блик от фонарика)
     # анимации окон
     "animations": True,
     "minimize_effect": "genie",   # genie | scale

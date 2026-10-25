@@ -14,7 +14,7 @@ import win32api
 import win32con
 import win32gui
 from PySide6.QtCore import QPointF, QRect, QRectF, QSizeF, Qt, QTimer
-from PySide6.QtGui import (QAction, QActionGroup, QColor, QCursor, QFont, QFontMetricsF, QLinearGradient,
+from PySide6.QtGui import (QAction, QActionGroup, QBrush, QColor, QCursor, QFont, QFontMetricsF, QLinearGradient, QRadialGradient,
                            QPainter, QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
 
@@ -157,6 +157,7 @@ class Dock(QWidget):
         self.last_seen = time.monotonic()
         self.reveal_until = 0.0
         self.mouse_u = -1.0
+        self.light_pos = None  # где курсор подсвечивает обводку
         self.base_span = (0.0, 0.0)
         self.rects = []
         self.targets = {}
@@ -469,6 +470,11 @@ class Dock(QWidget):
         if inside and uv.x() != self.mouse_u:
             self.mouse_u = uv.x()
             changed = True
+        if self.cfg["dock_border_light"] and inside:  # подсветка обводки следует за курсором и поперёк дока
+            pos = QPointF(self.mapFromGlobal(gpos))
+            if pos != self.light_pos:
+                self.light_pos = pos
+                changed = True
         if self.hover != hover_target:
             self.hover += (hover_target - self.hover) * smooth(0.22, self.anim.dt)
             if abs(self.hover - hover_target) < 0.01:
@@ -657,6 +663,15 @@ class Dock(QWidget):
         if cfg["dock_border"]:
             p.setPen(QPen(QColor(255, 255, 255, 50), 1))
             p.drawPath(path)
+            if cfg["dock_border_light"] and self.hover > 0.01 and self.light_pos is not None:
+                # курсор — как фонарик: рядом с ним обводка становится светлее, к краям пятна — как была
+                glow = QRadialGradient(self.light_pos, B * 2.4)
+                glow.setColorAt(0.0, QColor(255, 255, 255, int(150 * self.hover)))
+                glow.setColorAt(0.45, QColor(255, 255, 255, int(55 * self.hover)))
+                glow.setColorAt(1.0, QColor(255, 255, 255, 0))
+                p.setPen(QPen(QBrush(glow), 1.2))
+                p.setBrush(Qt.NoBrush)
+                p.drawPath(path)
 
         uv_mouse = self.to_uv(QPointF(self.mapFromGlobal(QCursor.pos())))
         hovered = self.item_at(uv_mouse) if self.hover > 0.5 and self.hide_k < 0.1 else None
