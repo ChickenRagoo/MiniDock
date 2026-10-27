@@ -635,6 +635,11 @@ def responds(hwnd, ms=30):
     return bool(user32.SendMessageTimeoutW(hwnd, 0, 0, 0, 0x0002, ms, ctypes.byref(res)))  # WM_NULL, ABORTIFHUNG
 
 
+_invisible = {}    # hwnd -> исходный exstyle: окна, которые мы сделали прозрачными и ещё не вернули
+_inflight = set()  # окна, которым видимость возвращается прямо сейчас (в фоне)
+_tries = {}
+
+
 def make_invisible(hwnd):
     """Делает чужое окно полностью прозрачным (оно остаётся «живым» для DWM-миниатюр).
 
@@ -645,6 +650,7 @@ def make_invisible(hwnd):
         ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
         if ex & win32con.WS_EX_LAYERED or not responds(hwnd):
             return None
+        _invisible[hwnd] = ex  # до вызовов: даже если они упадут на полпути, окно потом проверим
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex | win32con.WS_EX_LAYERED)
         win32gui.SetLayeredWindowAttributes(hwnd, 0, 0, win32con.LWA_ALPHA)
         return ex
@@ -653,6 +659,7 @@ def make_invisible(hwnd):
 
 
 def make_visible(hwnd, ex):
+    _invisible[hwnd] = ex  # пока не убедимся, что окно снова видно
     if not responds(hwnd):  # программа занята — вернём видимость в фоне, не задерживая интерфейс
         threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True).start()
         return
@@ -660,6 +667,7 @@ def make_visible(hwnd, ex):
 
 
 def _make_visible(hwnd, ex):
+    _inflight.add(hwnd)
     try:
         win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_ALPHA)
         win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex)
@@ -667,6 +675,55 @@ def _make_visible(hwnd, ex):
                               | win32con.RDW_ALLCHILDREN)
     except Exception:
         pass
+    finally:
+        _inflight.discard(hwnd)
+    if not win32gui.IsWindow(hwnd) or not is_transparent(hwnd):
+        _invisible.pop(hwnd, None)  # получилось — больше не следим
+        _tries.pop(hwnd, None)
+
+
+user32.GetLayeredWindowAttributes.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
+                                               ctypes.POINTER(ctypes.c_ubyte), ctypes.POINTER(wintypes.DWORD)]
+
+
+def is_transparent(hwnd):
+    """Окно полностью прозрачное (слой с нулевой непрозрачностью)."""
+    try:
+        if not win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) & win32con.WS_EX_LAYERED:
+            return False
+        key, alpha, flags = wintypes.DWORD(), ctypes.c_ubyte(), wintypes.DWORD()
+        if not user32.GetLayeredWindowAttributes(hwnd, ctypes.byref(key), ctypes.byref(alpha), ctypes.byref(flags)):
+            return False
+        return bool(flags.value & win32con.LWA_ALPHA) and alpha.value == 0
+    except Exception:
+        return False
+
+
+def ensure_visible(busy=()):
+    """Раз в секунду: окна, которые мы прятали ради анимации, но так и не вернули (программа была занята —
+    Photoshop, тяжёлые редакторы, — и вызов не прошёл), — вернуть ещё раз. Иначе окно оставалось невидимым:
+    клики по нему в доке «ничего не делали», а миниатюра была чёрной. busy — окна, у которых идёт анимация.
+    Возвращает, сколько окон пришлось чинить."""
+    fixed = 0
+    for hwnd, ex in list(_invisible.items()):
+        if not win32gui.IsWindow(hwnd):
+            _invisible.pop(hwnd, None)
+            _tries.pop(hwnd, None)
+            continue
+        if hwnd in busy or hwnd in _inflight:
+            continue
+        if not is_transparent(hwnd):
+            _invisible.pop(hwnd, None)
+            _tries.pop(hwnd, None)
+            continue
+        _tries[hwnd] = _tries.get(hwnd, 0) + 1
+        if _tries[hwnd] > 60:  # минуту не выходит — сдаёмся, чтобы не крутиться вечно
+            _invisible.pop(hwnd, None)
+            _tries.pop(hwnd, None)
+            continue
+        fixed += 1
+        threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True).start()
+    return fixed
 
 
 def restored_frame(hwnd, known=None):

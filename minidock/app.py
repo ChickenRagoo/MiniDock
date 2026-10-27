@@ -29,7 +29,7 @@ from .version import __version__
 from .winapi import (EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, EVENT_SYSTEM_CAPTURESTART, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
                      EVENT_SYSTEM_MINIMIZESTART, WINEVENTPROC, Taskbar, app_windows, default_pinned,
                      force_foreground, foreground_is_fullscreen, fullscreen_monitor, get_work_area, set_window_shadows,
-                     set_work_area, taskbar_windows, user32, window_monitor, window_shadows, appbar_lost)
+                     set_work_area, taskbar_windows, user32, window_monitor, window_shadows, appbar_lost, ensure_visible, primary_monitor_rect)
 
 QUIT_EVENT = "MiniDock_Quit"
 # команды уже запущенному доку: MiniDock.pyw --launchpad / --settings (удобно повесить на ярлык)
@@ -136,7 +136,8 @@ class App:
             print(f"[{time.strftime('%Y-%m-%d %H:%M')}] MiniDock {__version__}: экраны {screens}; память {mem} МБ"
                   f" (помощник размытия {mb(helper)} МБ); снимки окон {len(an.snaps)} шт {mb(snaps)} МБ, свёрнутые"
                   f" {len(an.min_imgs)} шт {mb(mins)} МБ, кадр кнопок {mb(press)} МБ; слоёв анимации {len(an.gpus)};"
-                  f" панели регистрировали заново {self.stats['area']} раз;"
+                  f" панели регистрировали заново {self.stats['area']} раз, док и панель расставляли заново"
+                  f" {self.stats.get('placed', 0)} раз, невидимые окна чинили {self.stats.get('unhid', 0)} раз;"
                   f" {caches}",
                   file=sys.stderr, flush=True)
         except Exception:
@@ -518,6 +519,41 @@ class App:
                     w.hide()
                 elif w is self.dock or self.cfg["menubar"]:
                     w.show()
+            if not full:  # игра могла менять разрешение экрана — расставить док и панель заново
+                QTimer.singleShot(300, self.apply_layout)
+                QTimer.singleShot(2500, self.apply_layout)
+
+    def check_placement(self):
+        """Док и панель стоят у своего края и целиком на своём мониторе? После игр со сменой разрешения
+        бывало, что док оставался там, где был край «игрового» экрана (у правого края, посреди экрана)."""
+        wrong = []
+        for w in self.docks() + (self.bars() if self.cfg["menubar"] else []):
+            if not w.isVisible():
+                continue
+            try:
+                l, t, r, b = win32gui.GetWindowRect(int(w.winId()))
+                ml, mt, mr, mb = (primary_monitor_rect() if w.home is None
+                                  else window_monitor(int(w.winId()))[1])
+            except Exception:
+                continue
+            tol = 3
+            inside = l >= ml - tol and t >= mt - tol and r <= mr + tol and b <= mb + tol
+            if isinstance(w, Dock):
+                side = w.side
+                at_edge = {"bottom": mb - tol - 200 <= b <= mb + tol, "left": abs(l - ml) <= tol,
+                           "right": abs(r - mr) <= tol}.get(side, True)
+            else:
+                at_edge = abs(t - mt) <= tol and abs(l - ml) <= tol and abs(r - mr) <= tol
+            if not (inside and at_edge):
+                wrong.append(f"{type(w).__name__} {(l, t, r, b)} на мониторе {(ml, mt, mr, mb)}")
+        now = time.monotonic()
+        if wrong and now - getattr(self, "_placed_at", 0) > 5:
+            self._placed_at = now
+            self.stats["placed"] = self.stats.get("placed", 0) + 1
+            if self.stats["placed"] <= 3 and sys.stderr is not None:
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] не на месте, расставляю заново: {'; '.join(wrong)}",
+                      file=sys.stderr, flush=True)
+            self.apply_layout()
 
     def fast_poll(self):
         self.check_fullscreen()
@@ -534,6 +570,11 @@ class App:
         self.ticks = getattr(self, "ticks", 0) + 1
         if self.ticks % 5 == 0:
             self.check_appbars()
+        fixed = ensure_visible(set(self.animator.hidden))
+        if fixed:
+            self.stats["unhid"] = self.stats.get("unhid", 0) + fixed
+        if self.ticks % 2 == 0 and not self.fullscreen:
+            self.check_placement()
         self.check_fullscreen()
         # на дополнительных мониторах — то же самое, но для игры на их собственном экране
         game = fullscreen_monitor() if self.extra_docks or self.extra_bars else None
