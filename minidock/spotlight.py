@@ -4,6 +4,7 @@ import ctypes
 import datetime
 import math
 import operator
+import functools
 import os
 import subprocess
 import threading
@@ -64,7 +65,62 @@ def calc(text):
     return str(value)
 
 
+# -- поиск на любом языке: не та раскладка и транслит --------------------------------------------------
+_EN = "`qwertyuiop[]asdfghjkl;'zxcvbnm,./"
+_RU = "ёйцукенгшщзхъфывапролджэячсмитьбю."
+_TO_RU = {e: r for e, r in zip(_EN, _RU)}
+_TO_EN = {r: e for e, r in zip(_EN, _RU)}
+_TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюя",
+                     ["a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r",
+                      "s", "t", "u", "f", "kh", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya"]))
+# звуковой «скелет»: одинаково для «телеграм» и telegram, «хром» и chrome, «стим» и steam, «ютуб» и youtube
+_SOUNDS = [("sch", "sh"), ("ph", "f"), ("ck", "k"), ("qu", "kv"), ("c", "k"), ("q", "k"), ("w", "v"), ("x", "ks"),
+           ("you", "iu"), ("ou", "u"), ("ee", "i"), ("ea", "i"), ("y", "i"), ("ai", "i"), ("ei", "i")]
+
+
+def swap_layout(text):
+    """Текст, набранный не в той раскладке: «ntktuhfv» → «телеграм», «еудупкфь» → «telegram»."""
+    cyr = sum("а" <= ch <= "я" or ch == "ё" for ch in text)
+    table = _TO_EN if cyr * 2 >= len(text) else _TO_RU
+    return "".join(table.get(ch, ch) for ch in text)
+
+
+@functools.lru_cache(maxsize=4096)
+def skeleton(text):
+    s = "".join(_TRANSLIT.get(ch, ch) for ch in text.casefold())
+    for a, b in _SOUNDS:
+        s = s.replace(a, b)
+    out = []
+    for ch in s:  # двойные буквы — как одна (Photoshop / фотошоп, Steam / стим)
+        if not out or out[-1] != ch or not ch.isalpha():
+            out.append(ch)
+    return "".join(out)
+
+
 def score(name, q):
+    """Насколько название подходит к запросу. Находит и набранное не в той раскладке, и транслитом —
+    такие совпадения чуть ниже точных."""
+    best = _score(name, q)
+    if len(q) < 2 or best >= 100:
+        return best
+    swapped = swap_layout(q)
+    variants = [(swapped, 6)]
+    if len(q) >= 3 and any(ch.isalpha() for ch in q):  # по звучанию — от трёх букв, иначе слишком много шума
+        variants += [(q, 10), (swapped, 14)]  # «телеграм», «ntktuhfv»
+    extra = 30 if best else 0  # у самого запроса уже есть совпадение — догадки идут ниже него
+    for i, (v, penalty) in enumerate(variants):
+        penalty += extra
+        if i == 0:
+            s = _score(name, v)
+        else:
+            sk = skeleton(v)
+            s = _score(skeleton(name), sk) if len(sk) >= 2 else 0
+        if s:
+            best = max(best, s - penalty)
+    return best
+
+
+def _score(name, q):
     n = name.casefold()
     if n == q:
         return 120
