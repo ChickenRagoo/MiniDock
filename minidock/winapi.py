@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import threading
+import time
 import winreg
 from ctypes import wintypes
 from pathlib import Path
@@ -405,7 +406,10 @@ def force_foreground(hwnd):
     """Выводит окно на передний план, обходя ограничения Windows на смену фокуса."""
     try:
         if win32gui.IsIconic(hwnd):
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            if responds(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            else:  # программа занята: синхронный вызов подвесил бы весь MiniDock, пока она не освободится
+                user32.ShowWindowAsync(wintypes.HWND(hwnd), win32con.SW_RESTORE)
     except Exception:
         return
     if try_foreground(hwnd):
@@ -555,7 +559,8 @@ def refit_maximized(hwnd, area):
     al, at, ar, ab = area
     try:  # окно программы, запущенной от администратора, Windows двигать не даёт — тогда просто не трогаем
         win32gui.SetWindowPos(hwnd, 0, al - border, at - border, ar - al + 2 * border, ab - at + 2 * border,
-                              win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER)
+                              win32con.SWP_NOZORDER | win32con.SWP_NOACTIVATE | win32con.SWP_NOOWNERZORDER
+                              | win32con.SWP_ASYNCWINDOWPOS)  # занятая программа не подвесит MiniDock
     except Exception:
         return False
     return True
@@ -636,43 +641,84 @@ def responds(hwnd, ms=30):
 
 
 _invisible = {}    # hwnd -> исходный exstyle: окна, которые мы сделали прозрачными и ещё не вернули
-_inflight = set()  # окна, которым видимость возвращается прямо сейчас (в фоне)
+_inflight = set()  # окна, которым видимость меняется прямо сейчас (в фоне)
 _tries = {}
+
+# Программы, которые рисуют окно видеокартой: прозрачный слой ломает им отрисовку — миниатюра чёрная,
+# после анимации окно остаётся полупрозрачным и не разворачивается. Их окна анимируем без этого трюка.
+NO_FADE_EXES = {"photoshop.exe", "illustrator.exe", "afterfx.exe", "adobe premiere pro.exe", "indesign.exe",
+                "lightroom.exe", "adobe media encoder.exe", "animate.exe", "photoshop elements.exe",
+                "blender.exe", "unity.exe"}
+_slow_exes = set()  # программы, которые хоть раз не ответили вовремя на смену стиля окна (до перезапуска)
+
+
+# Через ctypes, а не win32gui: pywin32 держит GIL всё время вызова, и пока занятая программа не ответит,
+# стоял бы и главный поток MiniDock — ожидание в фоновом потоке ничего бы не дало.
+user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_ubyte, wintypes.DWORD]
+user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+
+
+def _hide(hwnd, ex):
+    _inflight.add(hwnd)
+    try:
+        user32.SetWindowLongPtrW(hwnd, win32con.GWL_EXSTYLE, ex | win32con.WS_EX_LAYERED)
+        user32.SetLayeredWindowAttributes(hwnd, 0, 0, win32con.LWA_ALPHA)
+    except Exception:
+        pass
+    finally:
+        _inflight.discard(hwnd)
 
 
 def make_invisible(hwnd):
     """Делает чужое окно полностью прозрачным (оно остаётся «живым» для DWM-миниатюр).
 
     Возвращает исходный расширенный стиль, чтобы потом вернуть как было, или None,
-    если окно само управляет прозрачностью и трогать его нельзя.
+    если окно само управляет прозрачностью или трогать его нельзя.
     """
     try:
         ex = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
-        if ex & win32con.WS_EX_LAYERED or not responds(hwnd):
+        if ex & win32con.WS_EX_LAYERED or hwnd in _inflight:
+            return None
+        exe = os.path.basename(window_exe(hwnd))
+        if exe in NO_FADE_EXES or exe in _slow_exes or not responds(hwnd):
             return None
         _invisible[hwnd] = ex  # до вызовов: даже если они упадут на полпути, окно потом проверим
-        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex | win32con.WS_EX_LAYERED)
-        win32gui.SetLayeredWindowAttributes(hwnd, 0, 0, win32con.LWA_ALPHA)
-        return ex
+        # Смена стиля — синхронный вызов в поток программы. Photoshop успевал ответить на проверку и тут же
+        # занимался своим, а MiniDock ждал его секундами. Теперь ждём недолго; не успела — анимации не будет,
+        # а если окно всё-таки станет прозрачным позже, ensure_visible вернёт его как было.
+        t = threading.Thread(target=_hide, args=(hwnd, ex), daemon=True)
+        t.start()
+        t.join(0.08)
+        if t.is_alive():
+            _slow_exes.add(exe)
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {exe} не ответил вовремя — его окна больше не прячем "
+                  f"для анимаций", file=sys.stderr, flush=True)
+            return None
+        if is_transparent(hwnd):
+            return ex
+        if win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE) != ex:  # стиль сменился, а прозрачность нет
+            threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True).start()
+        return None
     except Exception:
         return None
 
 
 def make_visible(hwnd, ex):
     _invisible[hwnd] = ex  # пока не убедимся, что окно снова видно
-    if not responds(hwnd):  # программа занята — вернём видимость в фоне, не задерживая интерфейс
-        threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True).start()
-        return
-    _make_visible(hwnd, ex)
+    # всегда в фоне, но обычно дожидаемся: программа может занять поток в любой момент, даже ответив на проверку
+    t = threading.Thread(target=_make_visible, args=(hwnd, ex), daemon=True)
+    t.start()
+    t.join(0.08)
 
 
 def _make_visible(hwnd, ex):
     _inflight.add(hwnd)
     try:
-        win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_ALPHA)
-        win32gui.SetWindowLong(hwnd, win32con.GWL_EXSTYLE, ex)
-        win32gui.RedrawWindow(hwnd, None, None, win32con.RDW_INVALIDATE | win32con.RDW_FRAME
-                              | win32con.RDW_ALLCHILDREN)
+        user32.SetLayeredWindowAttributes(hwnd, 0, 255, win32con.LWA_ALPHA)
+        user32.SetWindowLongPtrW(hwnd, win32con.GWL_EXSTYLE, ex)
+        user32.RedrawWindow(hwnd, None, None, win32con.RDW_INVALIDATE | win32con.RDW_FRAME | win32con.RDW_ALLCHILDREN)
     except Exception:
         pass
     finally:
