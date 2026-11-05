@@ -20,6 +20,7 @@ pub const WM_APP_FRAME: u32 = WM_APP + 1;
 pub const WM_APP_HOOK: u32 = WM_APP + 2; // клавиатурный хук → главный поток
 pub const WM_APP_COMMAND: u32 = WM_APP + 3; // команда от другого процесса (MiniDock.exe --launchpad …)
 pub const WM_APP_TASK: u32 = WM_APP + 4; // отложенная задача из фонового потока
+pub const WM_APP_CLICK: u32 = WM_APP + 5; // нажатие мыши где угодно на экране, пока открыто меню или всплывающее окно
 pub const WM_APP_APPBAR: u32 = WM_APP + 77; // уведомления панели (ABN_*)
 
 pub const CLASS: PCWSTR = w!("MiniDockWnd");

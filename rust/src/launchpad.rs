@@ -35,7 +35,7 @@ impl Tile {
 }
 
 pub struct Launchpad {
-    hwnd: HWND,
+    pub hwnd: HWND,
     surf: Surface,
     glass: Option<Glass>,
     shown: bool,
@@ -555,8 +555,7 @@ pub fn tick(app: &mut App) -> bool {
             return false;
         }
     }
-    let dt = ((now - lp.last) as f32).clamp(0.001, 0.05);
-    lp.last = now;
+    let dt = crate::anim::frame_dt(&mut lp.last);
     let target = lp.page as f32;
     if (lp.page_pos - target).abs() < 0.002 {
         lp.page_pos = target;

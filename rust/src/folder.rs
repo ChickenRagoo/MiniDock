@@ -41,6 +41,14 @@ impl FolderPopup {
         FolderPopup { hwnd: HWND::default(), surf: Surface::default(), glass: None, open: None, title: LineEdit::default(), hover: None, x: 0, y: 0, w: 0, h: 0, scale: 1.0, opened: 0.0, slide_down: false, blink_armed: false }
     }
 
+    pub fn contains_point(&self, x: i32, y: i32) -> bool {
+        self.open.is_some() && x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+
     pub fn is_open_for(&self, di: usize) -> bool {
         self.open.is_some_and(|(d, _)| d == di)
     }
@@ -136,6 +144,7 @@ pub fn open(app: &mut App, di: usize, id: u64, edit: bool) {
         let _ = SetWindowPos(f.hwnd, Some(HWND_TOPMOST), f.x, f.y, f.w, f.h, SWP_SHOWWINDOW);
     }
     sys::force_foreground(app.folder.hwnd);
+    app.update_click_watch();
     app.request_frame();
 }
 
@@ -152,6 +161,7 @@ pub fn close(app: &mut App) {
             d.menu_open = app.menus.is_open();
             d.wake();
         }
+        app.update_click_watch();
         app.request_frame();
     }
 }

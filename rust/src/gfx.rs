@@ -292,6 +292,14 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Сделать прямоугольник полностью прозрачным (дыра в слое: под ним видно другое окно).
+    pub fn clear_rect(&mut self, r: R) {
+        if let Some(rect) = r.sk() {
+            let p = tiny_skia::Paint { blend_mode: tiny_skia::BlendMode::Clear, anti_alias: false, ..Default::default() };
+            self.pm.fill_rect(rect, &p, Transform::identity(), self.clip.as_ref());
+        }
+    }
+
     pub fn fill_rrect(&mut self, r: R, radius: f32, c: Color) {
         if let Some(path) = rounded_rect(r, radius) {
             self.fill_path(&path, c);

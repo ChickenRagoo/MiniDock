@@ -246,8 +246,7 @@ pub struct Settings {
 impl Settings {
     pub fn frame(&mut self, cfg: &Config) -> bool {
         let now = crate::anim::now();
-        let dt = ((now - self.last) as f32).clamp(0.001, 0.05);
-        self.last = now;
+        let dt = crate::anim::frame_dt(&mut self.last);
         let mut busy = now - self.opened < 0.2;
         if (self.scroll - self.scroll_to).abs() > 0.5 {
             self.scroll += (self.scroll_to - self.scroll) * smooth(0.25, dt);

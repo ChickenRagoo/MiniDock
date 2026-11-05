@@ -389,6 +389,13 @@ impl Switcher {
                     }
                 }
             }
+            // живые миниатюры — в окне под этим слоем: над ними слой должен быть пустым. В Python-версии
+            // DWM рисует миниатюры поверх содержимого окна, и заливка выбранного окна видна только рамкой
+            // вокруг миниатюры; здесь без «дырки» она красила саму миниатюру в синий
+            for (_, t) in &tiles {
+                let (x0, y0) = (t.x.round(), t.y.round());
+                cv.clear_rect(R::new(x0, y0, t.right().round() - x0, t.bottom().round() - y0));
+            }
         }
         let a = (255.0 * k) as u8;
         self.surf.present(self.hwnd, self.x, self.y, a);
@@ -470,8 +477,7 @@ impl Switcher {
             win::show_noactivate(self.hwnd);
             win::set_topmost(self.hwnd);
         }
-        let dt = ((now - self.last) as f32).clamp(0.001, 0.05);
-        self.last = now;
+        let dt = crate::anim::frame_dt(&mut self.last);
         let mut busy = now - self.opened < 0.2;
         if self.style == Style::Mac && !self.apps.is_empty() {
             let t = self.icon_rect(cfg, self.index);

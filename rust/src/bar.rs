@@ -199,8 +199,7 @@ impl MenuBar {
     /// Кадр: анимации и отрисовка. true — ещё нужны кадры.
     pub fn frame(&mut self, cfg: &Config, widgets: &[(String, String)], bg: &Option<(Rc<Image>, f32)>) -> bool {
         let now = crate::anim::now();
-        let dt = ((now - self.last) as f32).clamp(0.001, 0.05);
-        self.last = now;
+        let dt = crate::anim::frame_dt(&mut self.last);
         let mut busy = false;
         if self.slide < 1.0 {
             self.slide = (self.slide + 0.07 * dt / FRAME_REF).min(1.0);
@@ -582,6 +581,7 @@ pub fn close_flyout(app: &mut App) {
             b.active = None;
             b.dirty = true;
         }
+        app.update_click_watch();
         app.request_frame();
     }
 }
@@ -600,11 +600,18 @@ fn toggle_flyout(app: &mut App, bi: usize, kind: Kind, key: &str, r: RECT) {
     crate::dbg_log(&format!("open_flyout {kind:?} at {:?}", (r.left, r.top, r.right, r.bottom)));
     app.flyout = Some(Flyout::open(kind, bi, key, r));
     app.bars[bi].active = Some(key.to_string());
+    app.update_click_watch();
     app.request_frame();
 }
 
 fn on_click(app: &mut App, bi: usize, key: &str, r: RECT) {
     let menu_at = |app: &mut App, items: Vec<MenuItem>, key: &str| {
+        // клик по заголовку открытого меню: меню уже закрылось от этого же нажатия — не открываем снова
+        let just_closed = app.menu_closed_key.as_ref().is_some_and(|(b, k)| *b == bi && k == key) && crate::anim::now() - app.menu_closed_at < 0.3;
+        app.menu_closed_key = None;
+        if just_closed {
+            return;
+        }
         app.bars[bi].active = Some(key.to_string());
         app.show_menu(items, r.left, r.bottom + 3, Owner::Bar(bi));
     };

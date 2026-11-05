@@ -96,6 +96,19 @@ pub fn start_clock() {
         .ok();
 }
 
+/// Длительность кадра для плавных анимаций. Анимация продолжилась после простоя — отсчёт заново
+/// (иначе первый шаг считался как за 50 мс и всё дёргалось рывком).
+pub fn frame_dt(last: &mut f64) -> f32 {
+    let now = now();
+    let gap = now - *last;
+    *last = now;
+    if gap > 0.1 {
+        crate::gfx::FRAME_REF
+    } else {
+        (gap as f32).clamp(0.001, 0.05)
+    }
+}
+
 /// Включить/выключить поток кадров (главный поток решает по итогам кадра).
 pub fn set_running(on: bool) {
     let mut r = RUNNING.lock().unwrap();

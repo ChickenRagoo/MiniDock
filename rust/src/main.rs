@@ -195,6 +195,8 @@ fn main() {
         }
     }
     if let Some(mut a) = app::App::take() {
-        a.cleanup();
+        if !a.cleaned {
+            a.cleanup();
+        }
     }
 }

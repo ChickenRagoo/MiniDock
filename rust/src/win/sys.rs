@@ -348,18 +348,16 @@ pub fn force_foreground(hwnd: HWND) {
         let attached = fg_thread != 0 && fg_thread != me && AttachThreadInput(me, fg_thread, true).as_bool();
         let _ = BringWindowToTop(hwnd);
         if !try_foreground(hwnd) {
-            press_alt_tap();
+            // Windows отдаёт фокус процессу, от которого пришло последнее нажатие. Раньше здесь нажимался Alt —
+            // но окно Win32 от одиночного Alt входит в «режим меню», который забирает мышь: меню MiniDock
+            // зависало — ни нажать пункт, ни закрыть. Неназначенная клавиша даёт то же право без побочных эффектов.
+            inject_dummy();
             try_foreground(hwnd);
         }
         if attached {
             let _ = AttachThreadInput(me, fg_thread, false);
         }
     }
-}
-
-fn press_alt_tap() {
-    inject_key(VK_MENU.0, false);
-    inject_key(VK_MENU.0, true);
 }
 
 pub fn syscommand(hwnd: HWND, cmd: u32) {

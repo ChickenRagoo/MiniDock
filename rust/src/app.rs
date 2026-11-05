@@ -123,6 +123,9 @@ pub struct App {
     pub flyout: Option<crate::flyouts::Flyout>,
     pub flyout_closed_at: f64,
     pub flyout_closed_key: Option<String>,
+    /// меню панели, закрытое кликом мимо (клик по тому же заголовку не открывает его снова)
+    pub menu_closed_key: Option<(usize, String)>,
+    pub menu_closed_at: f64,
     pub widgets: crate::widgets::Host,
     pub catalog: crate::catalog::Catalog,
     pub fullscreen: bool,
@@ -138,6 +141,7 @@ pub struct App {
     backgrounds: HashMap<String, Option<Rc<Image>>>,
     pub started: f64,
     pub quitting: bool,
+    pub cleaned: bool,
 }
 
 impl App {
@@ -164,6 +168,8 @@ impl App {
             flyout: None,
             flyout_closed_at: 0.0,
             flyout_closed_key: None,
+            menu_closed_key: None,
+            menu_closed_at: 0.0,
             widgets: crate::widgets::Host::new(),
             catalog: crate::catalog::Catalog::new(),
             fullscreen: false,
@@ -179,6 +185,7 @@ impl App {
             backgrounds: HashMap::new(),
             started: crate::anim::now(),
             quitting: false,
+            cleaned: false,
             cfg,
             msg,
         };
@@ -187,6 +194,10 @@ impl App {
         app.animator.set_sysanim_orig(orig);
         app.bars.push(crate::bar::MenuBar::new(None));
         app.sync_hook_flags();
+        let stale = appbar::remove_stale();
+        if stale > 0 {
+            crate::log::line(&format!("прошлый запуск не освободил место у края экрана (полос: {stale}) — освободил"));
+        }
         app.apply_layout();
         unsafe {
             // тестовые команды (--cmd) и команды от программ с другими правами доходят до окна сообщений
@@ -787,7 +798,37 @@ impl App {
     // -- меню, папки, Launchpad, настройки
     pub fn show_menu(&mut self, items: Vec<MenuItem>, x: i32, y: i32, owner: Owner) {
         self.menus.open(items, x, y, owner);
+        self.update_click_watch();
         self.request_frame();
+    }
+
+    /// Хук мыши нужен, только пока открыто меню, всплывающее окно панели или папка.
+    pub fn update_click_watch(&self) {
+        crate::win::hooks::watch_clicks(self.menus.is_open() || self.flyout.is_some() || self.folder.is_open());
+    }
+
+    /// Нажатие мыши где-то на экране (пока открыто меню/всплывающее окно): мимо — закрыть.
+    fn on_outside_click(&mut self, x: i32, y: i32) {
+        let in_menu = self.menus.contains_point(x, y);
+        if self.menus.is_open() && !in_menu {
+            self.menus.close_all();
+            self.menu_closed();
+        }
+        if let Some(f) = self.flyout.as_ref() {
+            let r = win::window_rect(f.hwnd);
+            if !in_menu && !(x >= r.left && x < r.right && y >= r.top && y < r.bottom) {
+                crate::bar::close_flyout(self);
+            }
+        }
+        // папку дока по клику в сам док закрывает (или переключает) док
+        let in_dock = self.docks.iter().any(|d| {
+            let r = win::window_rect(d.hwnd);
+            x >= r.left && x < r.right && y >= r.top && y < r.bottom
+        });
+        if self.folder.is_open() && !in_menu && !in_dock && !self.folder.contains_point(x, y) {
+            self.close_folder();
+        }
+        self.update_click_watch();
     }
 
     pub fn menu_closed(&mut self) {
@@ -800,11 +841,14 @@ impl App {
             }
             Some(Owner::Bar(bi)) => {
                 if let Some(b) = self.bars.get_mut(bi) {
+                    self.menu_closed_key = b.active.clone().map(|k| (bi, k));
+                    self.menu_closed_at = crate::anim::now();
                     b.menu_closed();
                 }
             }
             _ => {}
         }
+        self.update_click_watch();
         self.request_frame();
     }
 
@@ -897,6 +941,23 @@ impl App {
         }
     }
 
+    fn on_close(&mut self, hwnd: HWND) {
+        if self.docks.iter().any(|d| d.hwnd == hwnd) || self.bars.iter().any(|b| b.hwnd == hwnd) || hwnd == self.msg {
+            self.quit();
+        } else if hwnd == self.spotlight.hwnd {
+            crate::spotlight::close(self);
+        } else if hwnd == self.launchpad.hwnd {
+            crate::launchpad::close(self, None);
+        } else if self.menus.owns(hwnd).is_some() {
+            self.menus.close_all();
+            self.menu_closed();
+        } else if self.flyout.as_ref().is_some_and(|f| f.hwnd == hwnd) {
+            crate::bar::close_flyout(self);
+        } else if self.folder.is_open() {
+            self.close_folder();
+        }
+    }
+
     pub fn quit(&mut self) {
         self.quitting = true;
         unsafe {
@@ -905,6 +966,8 @@ impl App {
     }
 
     pub fn cleanup(&mut self) {
+        self.cleaned = true;
+        crate::win::hooks::watch_clicks(false);
         self.animator.cleanup();
         hooks::stop_keyboard_hook();
         let mut orig = self.cfg.taskbar_orig_state;
@@ -1011,6 +1074,10 @@ impl App {
                 win::WM_APP_FRAME => self.frame(),
                 win::WM_APP_HOOK => self.on_hook(wp.0, lp.0),
                 win::WM_APP_COMMAND => self.on_command(wp.0),
+                win::WM_APP_CLICK => {
+                    let (x, y) = win::lparam_xy(lp);
+                    self.on_outside_click(x, y);
+                }
                 WM_TIMER => match wp.0 {
                     TIMER_POLL => self.poll(),
                     TIMER_IDLE => self.idle(),
@@ -1052,9 +1119,6 @@ impl App {
                 _ => return None,
             }
             return Some(LRESULT(0));
-        }
-        if msg == WM_LBUTTONDOWN {
-            crate::dbg_log(&format!("on_message down {:?}: bars={:?} docks={:?} menus={:?}", hwnd.0, self.bars.iter().map(|b| b.hwnd.0).collect::<Vec<_>>(), self.docks.iter().map(|d| d.hwnd.0).collect::<Vec<_>>(), self.menus.hwnds().iter().map(|h| h.0).collect::<Vec<_>>()));
         }
         if crate::menu::on_message(self, hwnd, msg, wp.0, lp.0) {
             return Some(LRESULT(0));
@@ -1206,10 +1270,6 @@ fn fire_timer(id: usize) -> bool {
 }
 
 pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    if msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP {
-        let busy = APP.with(|a| a.try_borrow_mut().is_err());
-        crate::dbg_log(&format!("wndproc {msg:#x} hwnd={:?} busy={busy}", hwnd.0));
-    }
     if msg == win::WM_APP_TASK {
         run_tasks();
         with(|a| a.on_events());
@@ -1218,8 +1278,32 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     if msg == WM_TIMER && wp.0 >= 1000 && fire_timer(wp.0) {
         return LRESULT(0);
     }
+    // наши окна никогда не входят в системный «режим меню» (Alt / F10): он забирает мышь и окно зависает
+    if (msg == WM_SYSCOMMAND && (wp.0 & 0xFFF0) as u32 == SC_KEYMENU) || ((msg == WM_SYSKEYUP || msg == WM_SYSKEYDOWN) && (wp.0 == 0x12 || wp.0 == 0x79)) {
+        return LRESULT(0);
+    }
     if let Some(Some(r)) = with(|a| a.on_message(hwnd, msg, wp, lp)) {
         return r;
+    }
+    match msg {
+        // наши окна не уничтожаются по WM_CLOSE (taskkill без /F, Alt+F4): иначе док и панель пропали бы,
+        // а программа осталась бы висеть. Закрыть док или панель — значит выйти, как из меню
+        WM_CLOSE => {
+            with(|a| a.on_close(hwnd));
+            return LRESULT(0);
+        }
+        WM_QUERYENDSESSION => return LRESULT(1),
+        // выход из Windows: вернуть панель задач и рабочую область, пока процесс ещё жив
+        WM_ENDSESSION if wp.0 != 0 => {
+            with(|a| {
+                a.quitting = true;
+                if !a.cleaned {
+                    a.cleanup();
+                }
+            });
+            return LRESULT(0);
+        }
+        _ => {}
     }
     DefWindowProcW(hwnd, msg, wp, lp)
 }

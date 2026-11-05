@@ -197,7 +197,12 @@ impl Flyout {
             Kind::Bluetooth => self.load_bt(),
             Kind::Tray => {
                 self.tray = crate::tray::icons();
-                self.tray_icons = self.tray.iter_mut().map(|t| t.icon.take().map(|i| Rc::new(i.scaled(22, 22)))).collect();
+                let max = (22.0 * self.scale) as u32;
+                self.tray_icons = self
+                    .tray
+                    .iter_mut()
+                    .map(|t| t.icon.take().map(|i| Rc::new(if i.w > max || i.h > max { i.scaled(max, max) } else { i })))
+                    .collect();
             }
             Kind::Lang => {
                 self.layouts = keyboard_layouts();

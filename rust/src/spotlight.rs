@@ -388,7 +388,7 @@ fn run_system(app: &mut App, i: usize) {
 }
 
 pub struct Spotlight {
-    hwnd: HWND,
+    pub hwnd: HWND,
     surf: Surface,
     glass: Option<Glass>,
     pub visible: bool,

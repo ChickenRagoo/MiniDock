@@ -316,6 +316,12 @@ impl Preview {
                     cv.fill_rrect(t.adjusted(-5.0 * s, -5.0 * s, 5.0 * s, 5.0 * s), tr + 4.0 * s, rgba(255, 255, 255, 40));
                 }
             }
+            // миниатюры — в окне под этим слоем: над ними пусто, иначе фон панели их затемняет
+            // (в Python-версии DWM рисует их поверх содержимого окна)
+            for (_, t) in &tiles {
+                let (x0, y0) = (t.x.round(), t.y.round());
+                cv.clear_rect(R::new(x0, y0, t.right().round() - x0, t.bottom().round() - y0));
+            }
         }
         let a = (255.0 * k) as u8;
         self.surf.present(self.hwnd, self.x, self.y, a);

@@ -663,15 +663,20 @@ impl Dock {
 
     pub fn wake(&mut self) {
         self.still = 0;
+        if !self.animating {
+            // кадры шли из простоя: отсчёт времени заново, иначе первый шаг считался как за 50 мс — рывок
+            self.last_frame = crate::anim::now();
+        }
         self.animating = true;
     }
 
     fn at_screen_edge(&self, gx: i32, gy: i32) -> bool {
         let m = self.mon.rect;
         match self.side {
-            Side::Bottom => gy >= m.bottom - 1 && gx >= m.left && gx < m.right,
+            // как в Python-версии: две нижние (правые) строки пикселей
+            Side::Bottom => gy >= m.bottom - 2 && gx >= m.left && gx < m.right,
             Side::Left => gx <= m.left && gy >= m.top && gy < m.bottom,
-            Side::Right => gx >= m.right - 1 && gy >= m.top && gy < m.bottom,
+            Side::Right => gx >= m.right - 2 && gy >= m.top && gy < m.bottom,
         }
     }
 
@@ -759,8 +764,7 @@ impl Dock {
     /// Шаг анимации. Возвращает true, пока что-то движется (нужны следующие кадры).
     pub fn tick(&mut self, cfg: &Config, ctx: &DockCtx) -> bool {
         let now = crate::anim::now();
-        let dt = ((now - self.last_frame) as f32).clamp(0.001, 0.05);
-        self.last_frame = now;
+        let dt = crate::anim::frame_dt(&mut self.last_frame);
         let (gx, gy) = win::cursor_pos();
         let (lx, ly) = ((gx - self.x) as f32, (gy - self.y) as f32);
         let (u, v) = self.to_uv(lx, ly);

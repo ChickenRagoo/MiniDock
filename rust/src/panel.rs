@@ -158,8 +158,7 @@ impl Panel {
     /// Шаг анимаций (полосы, подсветка). true — ещё движется.
     pub fn tick(&mut self) -> bool {
         let now = crate::anim::now();
-        let dt = ((now - self.last) as f32).clamp(0.001, 0.05);
-        self.last = now;
+        let dt = crate::anim::frame_dt(&mut self.last);
         let mut busy = false;
         let k = smooth(0.12, dt);
         for (i, t) in self.targets.clone() {
@@ -378,7 +377,8 @@ impl Panel {
                             cv.fill_rrect(cr, px(7.0), rgba(255, 255, 255, (40.0 * g) as u8));
                         }
                         if let Some(ic) = icon {
-                            cv.image(ic, R::centered(cr.cx(), cr.cy(), px(22.0), px(22.0)));
+                            // в родном размере: маленький значок трея не растягивается до 22 px
+                            cv.image(ic, R::centered(cr.cx().round(), cr.cy().round(), ic.w as f32, ic.h as f32));
                         }
                         self.hits.push((R::new(lx + cx, y0l + y + cy, 40.0, 40.0), hit));
                     }

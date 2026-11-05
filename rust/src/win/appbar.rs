@@ -50,6 +50,42 @@ pub fn reserve(hwnd: HWND, rect: RECT, edge: u32) {
         }
         SHAppBarMessage(ABM_SETPOS, &mut d);
     }
+    save_registered();
+}
+
+// Проводник не забывает панель, окно которой умерло без ABM_REMOVE (MiniDock сняли через «Диспетчер
+// задач» или он упал): её полоса остаётся занятой, и с каждым таким разом развёрнутые окна сползают
+// всё ниже. Поэтому номера зарегистрированных окон лежат в файле, а при запуске «мёртвые» снимаются.
+
+fn registry_file() -> String {
+    format!("{}\\appbars-rs.txt", crate::config::cfg_dir())
+}
+
+fn save_registered() {
+    let list: Vec<String> = RESERVED.with(|r| r.borrow().keys().map(|k| format!("{k:x}")).collect());
+    if list.is_empty() {
+        let _ = std::fs::remove_file(registry_file());
+    } else {
+        let _ = std::fs::write(registry_file(), list.join("\n"));
+    }
+}
+
+/// Снять регистрации панелей, оставшиеся от прошлого запуска, который не успел их убрать.
+pub fn remove_stale() -> usize {
+    let Ok(text) = std::fs::read_to_string(registry_file()) else { return 0 };
+    let mut n = 0;
+    for h in text.lines().filter_map(|l| isize::from_str_radix(l.trim(), 16).ok()) {
+        let hwnd = HWND(h as *mut _);
+        if unsafe { !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() } {
+            unsafe {
+                let mut d = abd(hwnd);
+                SHAppBarMessage(ABM_REMOVE, &mut d);
+            }
+            n += 1;
+        }
+    }
+    let _ = std::fs::remove_file(registry_file());
+    n
 }
 
 pub fn is_reserved(hwnd: HWND) -> bool {
@@ -75,6 +111,7 @@ pub fn release(hwnd: HWND) {
             let mut d = abd(hwnd);
             SHAppBarMessage(ABM_REMOVE, &mut d);
         }
+        save_registered();
     }
 }
 

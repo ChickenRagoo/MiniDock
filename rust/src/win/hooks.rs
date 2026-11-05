@@ -410,6 +410,67 @@ pub fn start_keyboard_hook() {
         .ok();
 }
 
+// -- клики мимо меню
+//
+// Меню и всплывающие окна закрываются по клику мимо. Сигнала «окно потеряло фокус» для этого мало:
+// клик по доку или панели (они не берут фокус) его не даёт, а если Windows не отдала меню фокус,
+// его не будет вовсе. Поэтому, пока такое окно открыто (и только тогда), стоит хук мыши: он лишь
+// сообщает главному потоку, где нажали, и сразу пропускает нажатие дальше.
+
+static MOUSE_THREAD: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
+
+unsafe extern "system" fn mouse_proc(n: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if n == HC_ACTION as i32 {
+        let m = wp.0 as u32;
+        if m == WM_LBUTTONDOWN || m == WM_RBUTTONDOWN || m == WM_MBUTTONDOWN {
+            let ms = &*(lp.0 as *const MSLLHOOKSTRUCT);
+            let packed = ((ms.pt.x as u16 as u32) | ((ms.pt.y as u16 as u32) << 16)) as isize;
+            let t = TARGET.load(Relaxed);
+            if t != 0 {
+                let _ = PostMessageW(Some(HWND(t as *mut _)), crate::win::WM_APP_CLICK, WPARAM(m as usize), LPARAM(packed));
+            }
+        }
+    }
+    CallNextHookEx(None, n, wp, lp)
+}
+
+/// Включить/выключить слежение за кликами (поток с хуком мыши живёт только пока включено).
+pub fn watch_clicks(on: bool) {
+    let mut t = MOUSE_THREAD.lock().unwrap_or_else(|e| e.into_inner());
+    if on == (*t != 0) {
+        return;
+    }
+    if !on {
+        unsafe {
+            let _ = PostThreadMessageW(*t, WM_QUIT, WPARAM(0), LPARAM(0));
+        }
+        *t = 0;
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ok = std::thread::Builder::new()
+        .name("MiniDockMouseHook".into())
+        .stack_size(128 * 1024)
+        .spawn(move || unsafe {
+            // очередь сообщений потока — до того, как о нём узнают (иначе WM_QUIT может потеряться)
+            let mut msg = MSG::default();
+            let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+            let hinst = GetModuleHandleW(None).ok().map(|m| windows::Win32::Foundation::HINSTANCE(m.0));
+            let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0).ok();
+            let _ = tx.send(GetCurrentThreadId());
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                DispatchMessageW(&msg);
+            }
+            if let Some(h) = hook {
+                let _ = UnhookWindowsHookEx(h);
+            }
+        })
+        .is_ok();
+    if ok {
+        *t = rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap_or(0);
+    }
+}
+
 pub fn stop_keyboard_hook() {
     let t = THREAD.load(Relaxed);
     if t != 0 {

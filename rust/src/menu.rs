@@ -281,7 +281,7 @@ impl Menus {
                     self.set_hover(i, r);
                 }
             }
-            WM_LBUTTONUP => {
+            WM_LBUTTONUP | WM_RBUTTONUP => {
                 if let Some(j) = self.row_at(i, x, y) {
                     return self.choose(i, j);
                 }
@@ -411,6 +411,11 @@ pub enum MenuResult {
 
 pub fn on_message(app: &mut App, hwnd: HWND, msg: u32, wp: usize, lp: isize) -> bool {
     if app.menus.owns(hwnd).is_none() {
+        return false;
+    }
+    // только свои сообщения: остальные (WM_NCHITTEST, WM_MOUSEACTIVATE…) — Windows. Раньше меню отвечало
+    // «0» на всё, и на WM_NCHITTEST это значит «здесь ничего нет»: мышь проходила сквозь меню
+    if !matches!(msg, WM_MOUSEMOVE | WM_LBUTTONUP | WM_RBUTTONUP | WM_ACTIVATE | WM_KEYDOWN) {
         return false;
     }
     let (x, y) = if msg == WM_ACTIVATE { (0, lp as i32) } else { win::lparam_xy(windows::Win32::Foundation::LPARAM(lp)) };
