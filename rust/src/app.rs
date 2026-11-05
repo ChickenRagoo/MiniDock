@@ -115,6 +115,7 @@ pub struct App {
     pub flyout_closed_at: f64,
     pub flyout_closed_key: Option<String>,
     pub widgets: crate::widgets::Host,
+    pub catalog: crate::catalog::Catalog,
     pub fullscreen: bool,
     pub taskbar_hidden: bool,
     pub mru: Vec<isize>,
@@ -155,6 +156,7 @@ impl App {
             flyout_closed_at: 0.0,
             flyout_closed_key: None,
             widgets: crate::widgets::Host::new(),
+            catalog: crate::catalog::Catalog::new(),
             fullscreen: false,
             taskbar_hidden: false,
             mru: Vec::new(),
@@ -191,6 +193,10 @@ impl App {
             b.on_foreground(fg);
         }
         app.request_frame();
+        // каталог приложений для Launchpad и Spotlight — в фоне, чуть позже старта
+        defer_ms(2500, || {
+            with(|a| a.catalog.load());
+        });
         crate::log::line(&format!("MiniDock {} (Rust) запущен", env!("CARGO_PKG_VERSION")));
         app
     }
@@ -455,6 +461,23 @@ impl App {
     }
 
     fn frame(&mut self) {
+        let t0 = std::time::Instant::now();
+        self.frame_inner();
+        let us = t0.elapsed().as_micros() as u64;
+        thread_local! { static ST: std::cell::Cell<(u64, u64, u64)> = const { std::cell::Cell::new((0, 0, 0)) }; }
+        ST.with(|c| {
+            let (n, sum, max) = c.get();
+            let (n, sum, max) = (n + 1, sum + us, max.max(us));
+            if n >= 120 {
+                crate::dbg_log(&format!("кадр: в среднем {} мкс, максимум {} мкс", sum / n, max));
+                c.set((0, 0, 0));
+            } else {
+                c.set((n, sum, max));
+            }
+        });
+    }
+
+    fn frame_inner(&mut self) {
         crate::anim::frame_done();
         let mut active = false;
         let cfg = self.cfg.clone();
@@ -477,14 +500,15 @@ impl App {
         active |= self.menus.tick();
         active |= self.animator.tick();
         active |= self.preview.frame(&cfg);
-        active |= self.folder.frame(&cfg);
-        active |= self.launchpad.frame(&cfg);
-        active |= self.spotlight.frame(&cfg);
-        active |= self.switcher.frame(&cfg);
-        active |= self.clock.frame(&cfg);
-        if let Some(s) = self.settings.as_mut() {
-            active |= s.frame(&cfg);
+        if self.folder.frame(&cfg) {
+            crate::folder::tick(self);
+            active = true;
         }
+        active |= crate::launchpad::tick(self);
+        active |= crate::spotlight::tick(self);
+        active |= crate::switcher::tick(self);
+        active |= self.clock.frame(&cfg);
+        active |= crate::settings::tick(self);
         crate::bar::flyouts_frame(self, &mut active);
         crate::anim::set_running(active);
     }

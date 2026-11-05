@@ -28,6 +28,7 @@ pub static LAUNCHPAD_KEYS: AtomicBool = AtomicBool::new(false); // Launchpad о�
 pub static CLOCK_HOTKEY: AtomicU32 = AtomicU32::new(0); // vk | модификаторы << 16; 0 — выключено
 pub static RECORDING: AtomicBool = AtomicBool::new(false); // настройки ждут новое сочетание
 pub static TARGET: AtomicIsize = AtomicIsize::new(0); // окно главного потока
+pub static END_SWITCH: AtomicBool = AtomicBool::new(false); // переключились кликом — выйти из режима Alt+Tab
 static THREAD: AtomicU32 = AtomicU32::new(0);
 
 pub const MOD_CTRL: u32 = 1;
@@ -164,6 +165,9 @@ const LP_KEYS: [u32; 11] = [0x08, 0x09, 0x0D, 0x1B, 0x21, 0x22, 0x25, 0x26, 0x27
 /// Решение по одной клавише. true — забрать (не отдавать программе).
 fn handle(vk: u32, scan: u32, down: bool) -> bool {
     let s = st();
+    if END_SWITCH.swap(false, Relaxed) {
+        s.switching = false;
+    }
     if !is_alt(vk) && !is_win(vk) {
         unstick();
     }

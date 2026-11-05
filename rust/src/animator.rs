@@ -70,6 +70,7 @@ struct Anim {
     done: Done,
     finished: bool,
     release_at: Option<f64>,
+    frames: u32,
 }
 
 /// (l, t, r, b) → (a0, f0, a1, f1): f растёт в сторону дока, a — поперёк.
@@ -264,6 +265,7 @@ impl Animator {
     /// Начать анимацию окна hwnd: src — рамка окна, dst — иконка (физические пиксели).
     fn play(&mut self, hwnd: isize, src: RECT, dst: RECT, insets: [i32; 4], reverse: bool, dur: f32, cfg: &Config, mode: Mode, done: Done, held: bool) -> bool {
         if self.busy(hwnd) {
+            crate::dbg_log("anim: окно уже анимируется");
             return false;
         }
         let flow = Flow::from(cfg);
@@ -274,10 +276,14 @@ impl Animator {
         for _ in 0..n {
             match Thumb::new(self.overlay, win::hwnd_of(hwnd)) {
                 Some(t) => thumbs.push(t),
-                None => return false,
+                None => {
+                    crate::dbg_log("anim: DwmRegisterThumbnail не удалось");
+                    return false;
+                }
             }
         }
         let (sw, sh) = thumbs[0].source_size();
+        crate::dbg_log(&format!("anim: {} миниатюр, источник {sw}x{sh}, src {:?} dst {:?} reverse={reverse} held={held}", n, (src.left, src.top, src.right, src.bottom), (dst.left, dst.top, dst.right, dst.bottom)));
         if sw <= 0 || sh <= 0 {
             return false;
         }
@@ -300,6 +306,7 @@ impl Animator {
             done,
             finished: false,
             release_at: None,
+            frames: 0,
         };
         self.render(&a, if reverse { 1.0 } else { 0.0 });
         self.anims.push(a);
@@ -359,7 +366,9 @@ impl Animator {
             let a = &mut self.anims[i];
             if let Some(at) = a.release_at {
                 if now >= at {
-                    self.anims.remove(i);
+                    let a = self.anims.remove(i);
+                    let span = (now - a.start).max(0.001);
+                    crate::dbg_log(&format!("anim: {} кадров за {:.0} мс — {:.0} кадров/с", a.frames, span * 1000.0, a.frames as f64 / span));
                     continue;
                 }
                 i += 1;
@@ -379,6 +388,7 @@ impl Animator {
             let a = &self.anims[i];
             self.render(a, g);
             let a = &mut self.anims[i];
+            a.frames += 1;
             if t >= 1.0 && !a.finished {
                 a.finished = true;
                 match a.done {

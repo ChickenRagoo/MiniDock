@@ -58,6 +58,30 @@ pub fn run(cmd: &str) {
                 }
             }
         }
+        Some("minimize") | Some("restore") | Some("state") => {
+            // окно программы по части пути exe: minimize notepad
+            let want = parts.get(1).copied().unwrap_or("").to_lowercase();
+            let mut found = None;
+            for (exe, hs) in crate::win::sys::app_windows().iter().chain(std::iter::empty()) {
+                if exe.contains(&want) {
+                    found = hs.first().map(|h| h.0 as isize);
+                    break;
+                }
+            }
+            // свёрнутые окна в app_windows тоже есть (видимые свёрнутые)
+            let Some(h) = found else {
+                crate::dbg_log("testcmd: окно не найдено");
+                return;
+            };
+            crate::app::with(|a| match parts[0] {
+                "minimize" => a.minimize_window(h),
+                "restore" => a.restore_window(h),
+                _ => {
+                    let w = win::hwnd_of(h);
+                    crate::log::line(&format!("testcmd state: iconic={} visible={} exstyle={:#x}", crate::win::sys::is_iconic(w), crate::win::sys::is_visible(w), crate::win::sys::exstyle(w)));
+                }
+            });
+        }
         Some("hook") => {
             let t = crate::win::hooks::TARGET.load(std::sync::atomic::Ordering::Relaxed);
             unsafe {
