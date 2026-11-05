@@ -24,6 +24,7 @@ mod gfx;
 mod glass;
 mod imageio;
 mod launchpad;
+mod liveglass;
 mod lineedit;
 mod log;
 mod menu;
@@ -156,6 +157,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--log-test") {
         log::line("проверка журнала");
+        return;
+    }
+    // процесс-помощник живого размытия (запускает сам MiniDock)
+    if let Some(i) = args.iter().position(|a| a == "--glass-helper") {
+        if let Some(p) = args.get(i + 1) {
+            liveglass::helper_main(p);
+        }
         return;
     }
     // команда для проверки запущенного экземпляра: --cmd "click 100 20"

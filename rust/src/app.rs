@@ -141,6 +141,7 @@ pub struct App {
     backgrounds: HashMap<String, Option<Rc<Image>>>,
     pub started: f64,
     pub quitting: bool,
+    pub live_glass: crate::liveglass::LiveGlass,
     pub cleaned: bool,
 }
 
@@ -185,6 +186,7 @@ impl App {
             backgrounds: HashMap::new(),
             started: crate::anim::now(),
             quitting: false,
+            live_glass: crate::liveglass::LiveGlass::new(),
             cleaned: false,
             cfg,
             msg,
@@ -503,12 +505,21 @@ impl App {
         let mut active = false;
         let cfg = self.cfg.clone();
         for di in 0..self.docks.len() {
-            if self.docks[di].visible && self.docks[di].animating {
+            let (animating, repaint) = (self.docks[di].animating, self.docks[di].repaint);
+            if self.docks[di].visible && (animating || repaint) {
                 let ctx = dock::ctx_for(self, di);
                 let d = &mut self.docks[di];
-                d.tick(&cfg, &ctx);
+                if animating {
+                    d.tick(&cfg, &ctx);
+                }
+                d.repaint = false;
                 d.paint(&cfg, &ctx);
                 active |= d.animating;
+            }
+            // живое «стекло»: снимать фон, пока док на экране
+            match self.docks[di].glass_job {
+                Some((r, radius)) => self.live_glass.set_job(di as u32, r, radius),
+                None => self.live_glass.remove(di as u32),
             }
         }
         let wtexts: Vec<(String, String)> = self.widgets.enabled().iter().map(|id| (id.clone(), self.widgets.bar_text(id))).collect();
@@ -965,8 +976,19 @@ impl App {
         }
     }
 
+    /// Помощник живого размытия прислал кадры (или сообщил, что готов).
+    pub fn on_live_glass(&mut self) {
+        for slot in self.live_glass.take_inbox() {
+            if let Some(d) = self.docks.get_mut(slot as usize) {
+                d.repaint = true;
+            }
+        }
+        self.request_frame();
+    }
+
     pub fn cleanup(&mut self) {
         self.cleaned = true;
+        self.live_glass.shutdown();
         crate::win::hooks::watch_clicks(false);
         self.animator.cleanup();
         hooks::stop_keyboard_hook();
@@ -1270,6 +1292,10 @@ fn fire_timer(id: usize) -> bool {
 }
 
 pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    // кадры живого размытия — до разбора остальных сообщений: состояние программы может быть занято
+    if msg == WM_COPYDATA && crate::liveglass::on_copydata(wp, lp) {
+        return LRESULT(1);
+    }
     if msg == win::WM_APP_TASK {
         run_tasks();
         with(|a| a.on_events());

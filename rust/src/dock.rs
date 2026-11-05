@@ -256,6 +256,10 @@ pub struct Dock {
     last_frame: f64,
     last_cursor: (i32, i32),
     glass: crate::glass::Glass,
+    /// что снимать для живого «стекла»: участок экрана и сила размытия (None — не нужно)
+    pub glass_job: Option<(RECT, f32)>,
+    /// перерисовать один раз (пришёл новый кадр фона), не запуская анимацию
+    pub repaint: bool,
     pub side: Side,
     pub scale: f32,
     pub area: RECT,
@@ -313,6 +317,8 @@ impl Dock {
             last_frame: crate::anim::now(),
             last_cursor: (i32::MIN, 0),
             glass: crate::glass::Glass::new(),
+            glass_job: None,
+            repaint: false,
             side: Side::from(&cfg.position),
             scale: 1.0,
             area: RECT::default(),
@@ -727,6 +733,32 @@ impl Dock {
         (bg, rects, zone)
     }
 
+    /// Участок экрана для «стекла»: полоса, где может оказаться фон дока (с запасом на увеличение
+    /// иконок), плюс поле для размытия; и сила размытия для уменьшенной копии.
+    fn glass_region(&self, cfg: &Config) -> Option<(RECT, f32)> {
+        let (lo, hi) = self.base_span;
+        let b = self.b(cfg);
+        let extra = b * (Self::mag(cfg) - 1.0) * 2.5 + 20.0 * self.scale;
+        let r = self.to_win_rect(R::new(lo - extra, self.margin(cfg) - 2.0 * self.scale, (hi - lo) + 2.0 * extra, self.bar_height(cfg) + 4.0 * self.scale));
+        let (x0, y0) = (r.x.max(0.0), r.y.max(0.0));
+        let (x1, y1) = (r.right().min(self.w as f32), r.bottom().min(self.h as f32));
+        if x1 - x0 < 2.0 || y1 - y0 < 2.0 {
+            return None;
+        }
+        let m = self.mon.rect;
+        let mg = crate::liveglass::MARGIN;
+        let rect = RECT {
+            left: (self.x + x0.round() as i32 - mg).max(m.left),
+            top: (self.y + y0.round() as i32 - mg).max(m.top),
+            right: (self.x + x1.round() as i32 + mg).min(m.right),
+            bottom: (self.y + y1.round() as i32 + mg).min(m.bottom),
+        };
+        if rect.right - rect.left < 8 || rect.bottom - rect.top < 8 {
+            return None;
+        }
+        Some((rect, cfg.glass_radius * self.scale / crate::liveglass::DOWNSCALE as f32))
+    }
+
     pub fn base_span(&self) -> (f32, f32) {
         self.base_span
     }
@@ -920,8 +952,13 @@ impl Dock {
         let bg_win = self.to_win_rect(self.bg);
         let radius = b * cfg.dock_radius;
         let hovered = if self.dragging { None } else { self.hovered() };
-        // нативное размытие — в подложке под окном дока, по форме его фона
-        if cfg.dock_blur && self.visible && self.hide_k < 0.999 {
+        // живое «стекло» (как в Python-версии): размытый фон рисует сам док, в своей форме и в своём кадре
+        let live = cfg.dock_blur && ctx.live_glass && self.visible && self.hide_k < 0.99;
+        self.glass_job = if live { self.glass_region(cfg) } else { None };
+        // иначе — размытие Windows в подложке под окном дока, по форме его фона
+        if live {
+            self.glass.hide();
+        } else if cfg.dock_blur && self.visible && self.hide_k < 0.999 {
             let (l, t) = (self.x + bg_win.x.round() as i32, self.y + bg_win.y.round() as i32);
             let (r, bt) = (self.x + bg_win.right().round() as i32, self.y + bg_win.bottom().round() as i32);
             // уехавшая за край монитора часть не размывается (иначе размытие видно на соседнем мониторе)
@@ -973,6 +1010,12 @@ impl Dock {
         let mut cv = self.surf.canvas();
         cv.clear();
         if let Some(path) = rounded_rect(bg_win, radius) {
+            if live {
+                if let Some((img, r)) = &ctx.glass_frame {
+                    let dst = R::new((r.left - self.x) as f32, (r.top - self.y) as f32, (r.right - r.left) as f32, (r.bottom - r.top) as f32);
+                    cv.image_in_path(img, dst, &path, 1.0);
+                }
+            }
             cv.fill_path(&path, with_alpha(dock_color, cfg.dock_opacity as f32 / 255.0));
             if let Some((img, op)) = &bg_img {
                 draw_cover(&mut cv, img, bg_win, &path, *op);
@@ -1429,6 +1472,10 @@ pub struct DockCtx {
     pub preview_visible: bool,
     pub preview_item: Option<u64>,
     pub background: Option<(Rc<Image>, f32)>,
+    /// живое «стекло» включено и помощник работает
+    pub live_glass: bool,
+    /// последний размытый кадр фона под доком и участок экрана, который он покрывает
+    pub glass_frame: Option<(Rc<Image>, RECT)>,
 }
 
 fn lerp_rect(cur: R, tgt: R, k: f32) -> (R, bool) {
@@ -1498,6 +1545,8 @@ pub fn ctx_for(app: &App, di: usize) -> DockCtx {
         preview_visible: pv.visible,
         preview_item: pv.item.filter(|(d, _)| *d == di).map(|(_, i)| i),
         background: app.background("dock"),
+        live_glass: app.cfg.dock_blur && app.cfg.live_for("dock") && !app.live_glass.disabled,
+        glass_frame: app.live_glass.frame(di as u32),
     }
 }
 
