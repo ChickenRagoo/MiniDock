@@ -33,6 +33,8 @@ pub fn run(cmd: &str) {
     let num = |i: usize| parts.get(i).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
     crate::dbg_log(&format!("testcmd {cmd}"));
     match parts.first().copied() {
+        // зависание часов кадров (как у драйвера, переставшего присылать развёртку) — проверка сторожа
+        Some("stallclock") => crate::anim::simulate_stall(),
         Some("click") | Some("down") | Some("up") | Some("move") => {
             let (x, y) = (num(1), num(2));
             unsafe {

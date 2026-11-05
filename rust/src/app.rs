@@ -1102,7 +1102,12 @@ impl App {
                 }
                 WM_TIMER => match wp.0 {
                     TIMER_POLL => self.poll(),
-                    TIMER_IDLE => self.idle(),
+                    TIMER_IDLE => {
+                        if crate::anim::watchdog() {
+                            self.frame();
+                        }
+                        self.idle()
+                    }
                     TIMER_WINDOWS => {
                         win::kill_timer(self.msg, TIMER_WINDOWS);
                         self.refresh_windows();
@@ -1308,8 +1313,13 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     if (msg == WM_SYSCOMMAND && (wp.0 & 0xFFF0) as u32 == SC_KEYMENU) || ((msg == WM_SYSKEYUP || msg == WM_SYSKEYDOWN) && (wp.0 == 0x12 || wp.0 == 0x79)) {
         return LRESULT(0);
     }
-    if let Some(Some(r)) = with(|a| a.on_message(hwnd, msg, wp, lp)) {
+    let handled = with(|a| a.on_message(hwnd, msg, wp, lp));
+    if let Some(Some(r)) = handled {
         return r;
+    }
+    if msg == win::WM_APP_FRAME && handled.is_none() {
+        crate::anim::frame_skipped(); // состояние занято (системный диалог) — не терять следующие кадры
+        return LRESULT(0);
     }
     match msg {
         // наши окна не уничтожаются по WM_CLOSE (taskkill без /F, Alt+F4): иначе док и панель пропали бы,
