@@ -439,13 +439,13 @@ impl Flyout {
         {
             let mut cv = self.surf.canvas();
             cv.clear();
-            cv.fill_rrect(full.inset(0.5), 12.0 * s, rgba(34, 34, 40, 190));
+            cv.fill_rrect(full.inset(0.5), 12.0 * s, rgba(34, 34, 40, 150));
             cv.stroke_rrect(full.inset(0.5), 12.0 * s, rgba(255, 255, 255, 40), 1.0);
             self.panel.paint(&mut cv, 0.0, 0.0);
         }
         let dy = (-10.0 * s * (1.0 - k)) as i32;
         self.surf.present(self.hwnd, self.x, self.y + dy, (255.0 * k) as u8);
-        self.glass.place(self.x, self.y + dy, self.x + w, self.y + dy + h, (12.0 * s) as i32, self.hwnd, win::dwm::Blur::Acrylic, 0x01000000);
+        self.glass.place(self.x, self.y + dy, self.x + w, self.y + dy + h, (12.0 * s) as i32, self.hwnd, win::dwm::Blur::Blur, 0x01000000);
         if !win::is_visible(self.hwnd) {
             crate::dbg_log(&format!("flyout show {:?} {}x{} at {},{}", self.kind, w, h, self.x, self.y));
             unsafe {

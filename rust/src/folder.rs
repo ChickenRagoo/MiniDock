@@ -33,11 +33,12 @@ pub struct FolderPopup {
     scale: f32,
     opened: f64,
     slide_down: bool,
+    blink_armed: bool,
 }
 
 impl FolderPopup {
     pub fn new() -> FolderPopup {
-        FolderPopup { hwnd: HWND::default(), surf: Surface::default(), glass: None, open: None, title: LineEdit::default(), hover: None, x: 0, y: 0, w: 0, h: 0, scale: 1.0, opened: 0.0, slide_down: false }
+        FolderPopup { hwnd: HWND::default(), surf: Surface::default(), glass: None, open: None, title: LineEdit::default(), hover: None, x: 0, y: 0, w: 0, h: 0, scale: 1.0, opened: 0.0, slide_down: false, blink_armed: false }
     }
 
     pub fn is_open_for(&self, di: usize) -> bool {
@@ -64,7 +65,23 @@ impl FolderPopup {
     }
 
     pub fn frame(&mut self, _cfg: &Config) -> bool {
-        self.open.is_some() && ((crate::anim::now() - self.opened) < 0.2 || self.title.focused)
+        if self.open.is_none() {
+            return false;
+        }
+        if crate::anim::now() - self.opened < 0.2 {
+            return true;
+        }
+        // мигание курсора в названии — по таймеру, без кадров
+        if self.title.focused && !self.blink_armed {
+            self.blink_armed = true;
+            crate::app::defer_ms(530, || {
+                crate::app::with(|a| {
+                    a.folder.blink_armed = false;
+                    crate::folder::tick(a);
+                });
+            });
+        }
+        false
     }
 }
 

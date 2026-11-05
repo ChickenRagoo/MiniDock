@@ -120,7 +120,7 @@ impl BigClock {
         if let Some(g) = self.glass.as_mut() {
             if e > 0.05 {
                 let p = panel;
-                g.place(self.x + p.x as i32, self.y + p.y as i32, self.x + p.right() as i32, self.y + p.bottom() as i32, radius as i32, self.hwnd, win::dwm::Blur::Acrylic, 0x01000000);
+                g.place(self.x + p.x as i32, self.y + p.y as i32, self.x + p.right() as i32, self.y + p.bottom() as i32, radius as i32, self.hwnd, win::dwm::Blur::Blur, 0x01000000);
             } else {
                 g.hide();
             }

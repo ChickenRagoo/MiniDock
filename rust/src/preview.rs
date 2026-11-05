@@ -319,7 +319,7 @@ impl Preview {
         }
         let a = (255.0 * k) as u8;
         self.surf.present(self.hwnd, self.x, self.y, a);
-        self.glass.place(self.x, self.y, self.x + self.w, self.y + self.h, (RADIUS * s) as i32, self.hwnd, win::dwm::Blur::Acrylic, 0x01000000);
+        self.glass.place(self.x, self.y, self.x + self.w, self.y + self.h, (RADIUS * s) as i32, self.hwnd, win::dwm::Blur::Blur, 0x01000000);
         let rect = RECT { left: self.x, top: self.y, right: self.x + self.w, bottom: self.y + self.h };
         self.thumbs.show(self.hwnd, rect, &tiles, a);
         let rects: Vec<R> = tiles.iter().map(|t| t.1).collect();

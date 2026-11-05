@@ -86,8 +86,10 @@ pub fn spawn_then<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, 
     });
 }
 
+/// Размытие под панелями: чистое нативное размытие DWM — как «стекло» Python-версии (Acrylic добавлял
+/// шум и серую подложку, панели выглядели темнее и «грязнее»).
 pub fn blur_kind(_cfg: &Config) -> win::dwm::Blur {
-    win::dwm::Blur::Acrylic
+    win::dwm::Blur::Blur
 }
 
 const TIMER_POLL: usize = 1;
@@ -95,6 +97,13 @@ const TIMER_IDLE: usize = 2;
 const TIMER_WINDOWS: usize = 3;
 const TIMER_REPORT: usize = 4;
 const TIMER_FAST: usize = 5;
+const TIMER_CLOCK: usize = 6;
+
+/// Часы обновляются ровно на границе секунды (а не когда-то в течение неё).
+fn arm_clock(msg: HWND) {
+    let ms = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() }.wMilliseconds as u32;
+    win::set_timer(msg, TIMER_CLOCK, 1000 - ms.min(999) + 5);
+}
 
 pub struct App {
     pub cfg: Config,
@@ -184,6 +193,7 @@ impl App {
             let _ = ChangeWindowMessageFilterEx(msg, WM_COPYDATA, MSGFLT_ALLOW, None);
         }
         win::set_timer(msg, TIMER_POLL, 1000);
+        arm_clock(msg);
         win::set_timer(msg, TIMER_IDLE, 50);
         win::set_timer(msg, TIMER_REPORT, 3600 * 1000);
         app.poll();
@@ -565,11 +575,7 @@ impl App {
                 }
             }
         }
-        let cfg = self.cfg.clone();
-        for b in &mut self.bars {
-            b.on_second(&cfg);
-        }
-        self.clock.on_second(&cfg);
+
         if self.ticks % 15 == 0 {
             // страховка: события окон могли потеряться
             self.refresh_windows();
@@ -1013,6 +1019,15 @@ impl App {
                         self.refresh_windows();
                     }
                     TIMER_REPORT => self.report(),
+                    TIMER_CLOCK => {
+                        arm_clock(self.msg);
+                        let cfg = self.cfg.clone();
+                        for b in &mut self.bars {
+                            b.on_second(&cfg);
+                        }
+                        self.clock.on_second(&cfg);
+                        self.request_frame();
+                    }
                     TIMER_FAST => {
                         self.check_fullscreen();
                         if crate::anim::now() > self.fast_until {

@@ -66,6 +66,9 @@ pub struct Launchpad {
     scale: f32,
     last: f64,
     folder_icons: Vec<Option<Rc<Image>>>,
+    pub dirty: bool,
+    blink_armed: bool,
+    caret_shown: bool,
 }
 
 impl Launchpad {
@@ -102,6 +105,9 @@ impl Launchpad {
             scale: 1.0,
             last: 0.0,
             folder_icons: Vec::new(),
+            dirty: true,
+            blink_armed: false,
+            caret_shown: false,
         }
     }
 
@@ -319,6 +325,7 @@ fn on_search(app: &mut App, keep_page: bool) {
 
 pub fn on_loaded(app: &mut App) {
     build_top(app);
+    app.launchpad.dirty = true;
     app.request_frame();
 }
 
@@ -563,18 +570,38 @@ pub fn tick(app: &mut App) -> bool {
         lp.folder_k = (lp.folder_k + 0.09 * dt / FRAME_REF).min(1.0);
     }
     let hl_t = if cfg.lp_mode == "all" { 0.0 } else { 1.0 };
+    let mut anim = lp.closing.is_some() || now - lp.opened < 0.22 || lp.drag.is_some();
+    anim |= lp.page_pos != target || lp.mode_k < 1.0 || (lp.folder.is_some() && lp.folder_k < 1.0);
     if (lp.mode_hl - hl_t).abs() > 0.005 {
         lp.mode_hl = lerp(lp.mode_hl, hl_t, smooth(0.3, dt));
+        anim = true;
     } else {
         lp.mode_hl = hl_t;
     }
     // фокус: Windows может не отдать его с первого раза
-    if lp.closing.is_none() && now - lp.opened < 1.0 && sys::foreground() != lp.hwnd {
+    let focusing = lp.closing.is_none() && now - lp.opened < 1.0;
+    if focusing && sys::foreground() != lp.hwnd {
         sys::force_foreground(lp.hwnd);
     }
     win::hooks::LAUNCHPAD_KEYS.store(lp.closing.is_none() && sys::foreground() != lp.hwnd, std::sync::atomic::Ordering::Relaxed);
-    paint(app);
-    true
+    // весь экран перерисовывается только когда что-то изменилось (а курсор мигает по таймеру, без кадров)
+    let caret = (lp.search.focused && lp.search.caret_on()) || (lp.folder_title.focused && lp.folder_title.caret_on());
+    if anim || lp.dirty || caret != lp.caret_shown {
+        lp.dirty = false;
+        lp.caret_shown = caret;
+        paint(app);
+    }
+    let lp = &mut app.launchpad;
+    if !anim && !lp.blink_armed && (lp.search.focused || lp.folder_title.focused) {
+        lp.blink_armed = true;
+        crate::app::defer_ms(265, || {
+            crate::app::with(|a| {
+                a.launchpad.blink_armed = false;
+                a.request_frame();
+            });
+        });
+    }
+    anim || focusing
 }
 
 fn grid_items(app: &App) -> Vec<(usize, Tile, R)> {
@@ -995,6 +1022,7 @@ pub fn feed_key(app: &mut App, vk: u32, ch: Option<char>) {
         _ => None,
     });
     key(app, vk, ch);
+    app.launchpad.dirty = true;
     sys::force_foreground(app.launchpad.hwnd);
     app.request_frame();
 }
@@ -1038,10 +1066,11 @@ pub fn on_message(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
                 }
             }
             let i = index_at(app, fx, fy);
-            if i != app.launchpad.hover {
-                app.launchpad.hover = i;
-                app.launchpad.kb_nav = false;
+            if i == app.launchpad.hover {
+                return Some(LRESULT(0)); // ничего не изменилось — не перерисовываем весь экран
             }
+            app.launchpad.hover = i;
+            app.launchpad.kb_nav = false;
         }
         WM_LBUTTONDOWN | WM_RBUTTONDOWN => {
             let i = index_at(app, fx, fy);
@@ -1145,6 +1174,7 @@ pub fn on_message(app: &mut App, hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
         }
         _ => return None,
     }
+    app.launchpad.dirty = true;
     app.request_frame();
     Some(LRESULT(0))
 }

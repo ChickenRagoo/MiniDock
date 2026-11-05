@@ -486,6 +486,7 @@ impl Animator {
             }
         };
         self.take_snapshot(rk); // закроют — анимация закрытия по свежему кадру
+        crate::dbg_log(&format!("press: кнопка {hit} окна {rk:#x}, снимок {}", self.snap.is_some()));
         if hit == HTMINBUTTON {
             let ic = icon(rk);
             self.hold(cfg, rk, ic);
@@ -733,6 +734,7 @@ impl Animator {
             return false;
         }
         let s = self.snap.take().unwrap();
+        crate::dbg_log(&format!("close: анимация закрытия {}x{}", s.img.w, s.img.h));
         self.closing.push(Closing { img: s.img, rect: s.rect, start: crate::anim::now(), dur: cfg.anim_dur(0.22) as f64 });
         true
     }

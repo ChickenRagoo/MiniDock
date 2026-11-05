@@ -228,7 +228,7 @@ impl Menus {
         {
             let mut cv = l.surf.canvas();
             cv.clear();
-            cv.fill_rrect(full.inset(0.5), radius, rgba(38, 38, 44, 200));
+            cv.fill_rrect(full.inset(0.5), radius, rgba(38, 38, 44, 150));
             cv.stroke_rrect(full.inset(0.5), radius, rgba(255, 255, 255, 38), 1.0);
             for (j, (it, r)) in items.iter().zip(&rows).enumerate() {
                 if it.sep {
@@ -263,7 +263,7 @@ impl Menus {
         }
         let alpha = (k * 255.0) as u8;
         l.surf.present(l.hwnd, l.x, l.y, alpha);
-        l.glass.place(l.x, l.y, l.x + l.w, l.y + l.h, radius as i32, l.hwnd, crate::win::dwm::Blur::Acrylic, 0x01000000);
+        l.glass.place(l.x, l.y, l.x + l.w, l.y + l.h, radius as i32, l.hwnd, crate::win::dwm::Blur::Blur, 0x01000000);
     }
 
     fn row_at(&self, i: usize, x: i32, y: i32) -> Option<usize> {

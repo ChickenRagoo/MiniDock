@@ -409,6 +409,8 @@ pub struct Spotlight {
     h: i32,
     scale: f32,
     icons: HashMap<String, Option<Rc<Image>>>,
+    blink_armed: bool,
+    caret_shown: bool,
 }
 
 impl Spotlight {
@@ -435,6 +437,8 @@ impl Spotlight {
             h: 0,
             scale: 1.0,
             icons: HashMap::new(),
+            blink_armed: false,
+            caret_shown: false,
         }
     }
 
@@ -815,8 +819,24 @@ pub fn tick(app: &mut App) -> bool {
             file_search(app);
         }
     }
-    paint(app);
-    true
+    let sp = &app.spotlight;
+    let anim = sp.closing.is_some() || now - sp.opened < 0.2;
+    let caret = sp.edit.caret_on();
+    if anim || caret != sp.caret_shown {
+        app.spotlight.caret_shown = caret;
+        paint(app);
+    }
+    let sp = &mut app.spotlight;
+    if !anim && !sp.blink_armed {
+        sp.blink_armed = true;
+        crate::app::defer_ms(265, || {
+            crate::app::with(|a| {
+                a.spotlight.blink_armed = false;
+                a.request_frame();
+            });
+        });
+    }
+    anim || sp.file_due.is_some()
 }
 
 fn activate(app: &mut App, alt: bool) {
