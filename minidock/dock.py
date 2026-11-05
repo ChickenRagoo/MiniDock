@@ -240,7 +240,9 @@ class Dock(QWidget):
             self.release()
             return
         _, (l, t, r, b) = window_monitor(int(self.winId()))
-        thick = round(self.reserve_thickness() * self.home.devicePixelRatio())
+        # основной док: home = None — масштаб берём у основного монитора (раньше здесь падало при выключенном
+        # автоскрытии: место под док резервируется только тогда)
+        thick = round(self.reserve_thickness() * (self.home or QApplication.primaryScreen()).devicePixelRatio())
         edge = {"bottom": 3, "left": 0, "right": 2}[self.side]
         rect = {3: (l, b - thick, r, b), 0: (l, t, l + thick, b), 2: (r - thick, t, r, b)}[edge]
         appbar_reserve(int(self.winId()), rect, edge)
